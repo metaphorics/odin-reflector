@@ -1,0 +1,63 @@
+{
+  "description": "Codex reflector: code review (async), thinking metacognition (sync), bash failure diagnostics (async), stop-gate, and pre-compact summary",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|mcp__morph-mcp__edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "timeout": 120,
+            "async": true
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_odin_sequentialthinking-tools__.*|mcp__plugin_odin_actor-critic-thinking__.*|mcp__plugin_odin_shannon-thinking__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "timeout": 90
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "timeout": 90,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

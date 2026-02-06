@@ -1,0 +1,7 @@
+{
+  "name": "codex-reflector",
+  "version": "1.0.0",
+  "description": "Codex CLI reflector — independent critic, oracle, and metacognition layer",
+  "author": { "name": "cognitive-glitch" },
+  "license": "Apache-2.0"
+}
