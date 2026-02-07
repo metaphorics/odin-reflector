@@ -263,7 +263,7 @@ _MCP_THINKING_MARKERS: tuple[str, ...] = (
 
 # Category → (default_model, default_effort)
 _CATEGORY_DEFAULTS: dict[str, tuple[str, str]] = {
-    "code_change": (DEFAULT_MODEL, "medium"),
+    "code_change": (DEFAULT_MODEL, "low"),
     "plan_review": (DEFAULT_MODEL, "high"),
     "thinking": (DEFAULT_MODEL, "medium"),
     "bash_failure": (FAST_MODEL, "high"),
@@ -1026,7 +1026,7 @@ def main() -> None:
     result: dict | None = None
 
     if event == "Stop":
-        result = respond_stop(hook_data, cwd, "high", DEFAULT_MODEL)
+        result = respond_stop(hook_data, cwd, "medium", DEFAULT_MODEL)
 
     elif event == "SubagentStop":
         if hook_data.get("stop_hook_active"):
