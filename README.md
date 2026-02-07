@@ -10,8 +10,10 @@ Claude Code acts. Codex reviews. Every code change gets a second opinion. Every 
 - Python 3.8+ (stdlib only, no pip dependencies)
 
 ## Install
-claude plugin marketplace add metaphorics/odin-reflector
-claude plugin install codex-reflector@odin-reflector
+
+```bash
+claude plugin marketplace add metaphorics/odin-reflector; claude plugin install codex-reflector@odin-reflector
+```
 
 ## Hook Events
 
