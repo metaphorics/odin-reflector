@@ -126,7 +126,7 @@ def invoke_codex(prompt: str, cwd: str) -> str:
             "--skip-git-repo-check",
             "--full-auto",
             "-c",
-            "model_reasoning_effort=high",
+            "model_reasoning_effort=medium",
             "-o",
             out_path,
         ]
