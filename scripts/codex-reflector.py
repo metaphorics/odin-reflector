@@ -388,11 +388,9 @@ def respond_precompact(hook_data: dict, cwd: str) -> dict | None:
     if not raw_output:
         return None
 
+    # PreCompact doesn't support hookSpecificOutput — use systemMessage
     return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreCompact",
-            "additionalContext": f"Critical context summary (by Codex):\n{raw_output[:3000]}",
-        }
+        "systemMessage": f"Critical context summary (by Codex):\n{raw_output[:3000]}"
     }
 
 
