@@ -153,7 +153,10 @@ def _file_heuristics(file_path: str) -> list[str]:
     """Return additional review focus areas based on file path."""
     focuses: list[str] = []
     p = file_path.lower()
-    if any(x in p for x in (".env", "secret", "credential", "key", "token", "password", "auth")):
+    if any(
+        x in p
+        for x in (".env", "secret", "credential", "key", "token", "password", "auth")
+    ):
         focuses.append(
             "SECURITY-SENSITIVE FILE: Check for hardcoded secrets, credential leaks, improper access control."
         )
@@ -187,9 +190,13 @@ def _diff_heuristics(stat_section: str, diff_section: str) -> list[str]:
     # Count files from stat section only (each file line has ' | ')
     files_changed = sum(1 for line in stat_section.splitlines() if " | " in line)
     if diff_lines > 500:
-        focuses.append("LARGE DIFF: Prioritize structural/architectural review over line-by-line.")
+        focuses.append(
+            "LARGE DIFF: Prioritize structural/architectural review over line-by-line."
+        )
     elif diff_lines < 20:
-        focuses.append("SMALL DIFF: Focus on correctness details, off-by-one, boundary conditions.")
+        focuses.append(
+            "SMALL DIFF: Focus on correctness details, off-by-one, boundary conditions."
+        )
     if files_changed > 10:
         focuses.append(
             "MANY FILES: Check for incomplete refactors, inconsistent renames, orphaned references."
@@ -207,13 +214,17 @@ def _change_size_heuristics(content: str, old: str, new: str) -> list[str]:
     size = len(content or new or "")
     if old and new:
         if len(new) > len(old) * 3:
-            focuses.append("SIGNIFICANT EXPANSION: Check for scope creep, unnecessary additions.")
+            focuses.append(
+                "SIGNIFICANT EXPANSION: Check for scope creep, unnecessary additions."
+            )
         elif len(new) < len(old) // 2:
             focuses.append(
                 "SIGNIFICANT REDUCTION: Verify no accidental deletion of needed logic."
             )
     if size > 5000:
-        focuses.append("LARGE CONTENT: Focus on structural soundness, separation of concerns.")
+        focuses.append(
+            "LARGE CONTENT: Focus on structural soundness, separation of concerns."
+        )
     return focuses
 
 
@@ -384,10 +395,14 @@ def build_code_review_prompt(
         snippet = _redact(json.dumps(tool_input, indent=2)[:MAX_CONTENT])
 
     # Dynamic heuristic sections
-    extra_focus = _file_heuristics(file_path) + _change_size_heuristics(content, old, new)
+    extra_focus = _file_heuristics(file_path) + _change_size_heuristics(
+        content, old, new
+    )
     focus_block = ""
     if extra_focus:
-        focus_block = "\n\nContext-specific focus:\n" + "\n".join(f"- {f}" for f in extra_focus)
+        focus_block = "\n\nContext-specific focus:\n" + "\n".join(
+            f"- {f}" for f in extra_focus
+        )
 
     sandboxed = _sandbox_content("code-change", snippet)
 
@@ -533,7 +548,9 @@ Then explain your findings concisely."""
 
 
 def build_subagent_review_prompt(agent_type: str, transcript_tail: str) -> str:
-    sandboxed = _sandbox_content("subagent-transcript", _redact(transcript_tail[:MAX_CONTENT]))
+    sandboxed = _sandbox_content(
+        "subagent-transcript", _redact(transcript_tail[:MAX_CONTENT])
+    )
 
     return f"""You are reviewing the output of a {agent_type} subagent.
 Assume the subagent took shortcuts or missed requirements. Find what's wrong.
@@ -558,7 +575,9 @@ def build_stop_review_prompt(
 ) -> str:
     sections: list[str] = []
     if transcript_tail:
-        sections.append(_sandbox_content("transcript", _redact(transcript_tail[:15000])))
+        sections.append(
+            _sandbox_content("transcript", _redact(transcript_tail[:15000]))
+        )
     if git_context:
         sections.append(_sandbox_content("git-diff", _redact(git_context[:15000])))
     context = "\n\n".join(sections)
@@ -727,9 +746,7 @@ def respond_bash_failure(raw_output: str) -> dict:
     return {"systemMessage": f"Codex Diagnostic:\n{raw_output[:1500]}"}
 
 
-def respond_plan_review(
-    session_id: str, plan_path: str, raw_output: str
-) -> dict:
+def respond_plan_review(session_id: str, plan_path: str, raw_output: str) -> dict:
     verdict = parse_verdict(raw_output) if raw_output else "UNCERTAIN"
 
     if verdict == "FAIL":
@@ -758,7 +775,9 @@ def respond_subagent_review(raw_output: str) -> dict | None:
             "reason": f"Codex Subagent Review FAIL:\n{raw_output[:MAX_OUTPUT]}",
         }
     if verdict == "PASS":
-        return {"systemMessage": f"Codex Subagent Review PASS:\n{raw_output[:MAX_OUTPUT]}"}
+        return {
+            "systemMessage": f"Codex Subagent Review PASS:\n{raw_output[:MAX_OUTPUT]}"
+        }
     return None  # UNCERTAIN: allow silently
 
 
