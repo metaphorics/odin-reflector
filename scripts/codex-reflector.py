@@ -273,7 +273,7 @@ _MCP_THINKING_MARKERS: tuple[str, ...] = (
 # Category → (default_model, default_effort)
 _CATEGORY_DEFAULTS: dict[str, tuple[str, str]] = {
     "code_change": (DEFAULT_MODEL, "low"),
-    "plan_review": (DEFAULT_MODEL, "high"),
+    "plan_review": (DEFAULT_MODEL, "xhigh"),
     "thinking": (DEFAULT_MODEL, "medium"),
     "bash_failure": (FAST_MODEL, "high"),
 }
@@ -486,7 +486,8 @@ def build_code_review_prompt(tool_name: str, tool_input: dict) -> str:
 
     sandboxed = _sandbox_content("code-change", snippet)
 
-    return f"""You are an adversarial code reviewer. Assume defects exist until proven otherwise.
+    return (
+        f"""You are an adversarial code reviewer. Assume defects exist until proven otherwise.
 
 File: {file_path}
 Tool: {tool_name}
@@ -505,7 +506,9 @@ Your first line MUST be exactly PASS or FAIL.
 FAIL if: any non-trivial correctness or security issue found.
 PASS only if: no meaningful issues found after thorough review.
 
-Then explain your findings concisely.""" + _COMPACT_VERDICT
+Then explain your findings concisely."""
+        + _COMPACT_VERDICT
+    )
 
 
 def build_thinking_prompt(tool_name: str, tool_input: dict) -> str:
@@ -539,7 +542,8 @@ def build_thinking_prompt(tool_name: str, tool_input: dict) -> str:
 
     sandboxed = _sandbox_content("reasoning-step", _redact(text[:MAX_CONTENT]))
 
-    return f"""You are a metacognitive critic. Challenge this reasoning step.
+    return (
+        f"""You are a metacognitive critic. Challenge this reasoning step.
 
 Step {thought_num}/{total} from {tool_name}:
 
@@ -554,7 +558,9 @@ Evaluate:
 - Invalidating conditions: name one concrete scenario where this reasoning collapses
 - Overlooked alternatives: a fundamentally different approach not considered
 
-Be direct and concise. Do NOT output PASS or FAIL.""" + _COMPACT_ANALYSIS
+Be direct and concise. Do NOT output PASS or FAIL."""
+        + _COMPACT_ANALYSIS
+    )
 
 
 def build_bash_failure_prompt(tool_input: dict, error: str) -> str:
@@ -587,7 +593,8 @@ def build_bash_failure_prompt(tool_input: dict, error: str) -> str:
     if extra:
         extra_block = "\n\nContext-specific:\n" + "\n".join(f"- {e}" for e in extra)
 
-    return f"""A bash command failed. Perform structured root cause analysis.
+    return (
+        f"""A bash command failed. Perform structured root cause analysis.
 
 Command: {_redact(command)}
 Error: {_redact(error[:MAX_CONTENT])}
@@ -600,13 +607,16 @@ Analyze:
 4. ALTERNATIVE APPROACHES: How to avoid the failure entirely
 5. PREVENTION: Workflow changes to prevent recurrence
 
-Be concise and actionable.""" + _COMPACT_ANALYSIS
+Be concise and actionable."""
+        + _COMPACT_ANALYSIS
+    )
 
 
 def build_plan_review_prompt(plan_content: str, plan_path: str) -> str:
     sandboxed = _sandbox_content("plan", _redact(plan_content))
 
-    return f"""You are an adversarial plan reviewer. Assume the plan has critical gaps.
+    return (
+        f"""You are an adversarial plan reviewer. Assume the plan has critical gaps.
 
 Plan file: {plan_path}
 
@@ -624,7 +634,9 @@ Your first line MUST be exactly PASS or FAIL.
 FAIL if: critical gaps, feasibility issues, or significant technical errors found.
 PASS only if: plan is comprehensive, feasible, and technically sound.
 
-Then explain your findings concisely.""" + _COMPACT_VERDICT
+Then explain your findings concisely."""
+        + _COMPACT_VERDICT
+    )
 
 
 def build_subagent_review_prompt(agent_type: str, transcript_tail: str) -> str:
@@ -632,7 +644,8 @@ def build_subagent_review_prompt(agent_type: str, transcript_tail: str) -> str:
         "subagent-transcript", _redact(transcript_tail[:MAX_CONTENT])
     )
 
-    return f"""You are reviewing the output of a {agent_type} subagent.
+    return (
+        f"""You are reviewing the output of a {agent_type} subagent.
 Assume the subagent took shortcuts or missed requirements. Find what's wrong.
 
 {sandboxed}
@@ -647,7 +660,9 @@ Your first line MUST be exactly PASS or FAIL.
 FAIL if: task incomplete, quality poor, significant requirements missed, or factual errors.
 PASS only if: task fully completed with accurate, high-quality output.
 
-Then explain your findings concisely.""" + _COMPACT_VERDICT
+Then explain your findings concisely."""
+        + _COMPACT_VERDICT
+    )
 
 
 def build_stop_review_prompt(
@@ -678,7 +693,8 @@ def build_stop_review_prompt(
     if extra:
         extra_block = "\nContext-specific focus:\n" + "\n".join(f"- {e}" for e in extra)
 
-    return f"""You are a critical session reviewer. The agent is about to stop working.
+    return (
+        f"""You are a critical session reviewer. The agent is about to stop working.
 Review what was accomplished and determine if the work is truly complete.
 
 {context}
@@ -695,11 +711,14 @@ Your first line MUST be exactly PASS or FAIL.
 FAIL if: work incomplete, has regressions, needs critical fixes, or significant quality issues.
 PASS only if: all requested work is complete and codebase is in a clean state.
 
-Then provide concise, actionable commentary.""" + _COMPACT_VERDICT
+Then provide concise, actionable commentary."""
+        + _COMPACT_VERDICT
+    )
 
 
 def build_precompact_prompt(transcript_tail: str) -> str:
-    return f"""You are summarizing critical session context before compaction.
+    return (
+        f"""You are summarizing critical session context before compaction.
 The following is the tail of the conversation transcript.
 
 ```
@@ -714,7 +733,9 @@ Summarize the critical context that MUST survive compaction:
 - Constraints or requirements discovered
 - Any pending FAIL reviews or action items
 
-Be concise but comprehensive. This summary will be the only context preserved.""" + _COMPACT_ANALYSIS
+Be concise but comprehensive. This summary will be the only context preserved."""
+        + _COMPACT_ANALYSIS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -943,12 +964,13 @@ def respond_precompact(
         debug("no transcript_path, skipping precompact")
         return None
 
-    transcript_tail = _read_tail(transcript_path, max_bytes=30_000)
-    if not transcript_tail:
-        debug("cannot read transcript, skipping precompact")
-        return None
+    # Intentional: Do not limit the size of the transcript
+    # transcript_tail = _read_tail(transcript_path, max_bytes=30_000)
+    # if not transcript_tail:
+    #     debug("cannot read transcript, skipping precompact")
+    #     return None
 
-    prompt = build_precompact_prompt(transcript_tail)
+    prompt = build_precompact_prompt(transcript_path)
     raw_output = invoke_codex(prompt, cwd, effort, model)
     if not raw_output:
         return None
