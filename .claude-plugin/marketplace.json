@@ -1,5 +1,5 @@
 {
-  "name": "codex-reflector-marketplace",
+  "name": "odin-reflector",
   "version": "1.0.0",
   "description": "Marketplace for the codex-reflector Claude Code plugin — independent second-model reviewer using OpenAI Codex CLI",
   "owner": {
