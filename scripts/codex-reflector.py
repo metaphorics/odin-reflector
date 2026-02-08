@@ -23,16 +23,30 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+import tiktoken
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 DEBUG = os.environ.get("CODEX_REFLECTOR_DEBUG", "0") == "1"
-MAX_CONTENT = 200_000  # chars sent to codex per prompt (~100K tokens)
-MAX_OUTPUT = 8000  # chars returned from codex in responses
+MAX_TRUNCATE_TOKENS = 200_000  # default token budget for smart truncation
+MAX_OUTPUT_TOKENS = 5_000  # token budget for output truncation
 STATE_DIR = Path("/tmp")
 DEFAULT_MODEL = "gpt-5.3-codex"
 FAST_MODEL = "gpt-5.1-codex-mini"
+
+# Lazy-loaded tiktoken encoder (cl100k_base covers GPT-4/Codex family)
+_encoder: tiktoken.Encoding | None = None
+
+
+def _count_tokens(text: str) -> int:
+    """Estimate token count using tiktoken cl100k_base."""
+    global _encoder
+    if _encoder is None:
+        _encoder = tiktoken.get_encoding("cl100k_base")
+    return len(_encoder.encode(text, disallowed_special=()))
+
 
 # Compact output directives — verdict vs non-verdict prompts.
 _COMPACT_VERDICT = """
@@ -95,6 +109,52 @@ def _read_tail(path: str, max_bytes: int = 20_000) -> str:
             return f.read()
     except OSError:
         return ""
+
+
+def _smart_truncate(
+    text: str, max_tokens: int = MAX_TRUNCATE_TOKENS, cwd: str = ""
+) -> str:
+    """HEAD~SUMMARY~TAIL truncation with FAST_MODEL middle summarization.
+
+    Keeps first 40% and last 40% of the token budget, summarizes the middle
+    with FAST_MODEL when cwd is available. Falls back to a marker when
+    summarization is unavailable or fails.
+    """
+    if not text:
+        return text
+    tokens = _count_tokens(text)
+    if tokens <= max_tokens:
+        return text
+
+    # Approximate chars-per-token ratio for splitting
+    char_ratio = len(text) / max(tokens, 1)
+    head_chars = int(max_tokens * 0.4 * char_ratio)
+    tail_chars = int(max_tokens * 0.4 * char_ratio)
+
+    head = text[:head_chars]
+    tail = text[-tail_chars:] if tail_chars else ""
+    middle = text[head_chars:-tail_chars] if tail_chars else text[head_chars:]
+
+    # Summarize middle with FAST_MODEL when cwd available
+    if cwd and len(middle) > 500:
+        summary_prompt = (
+            "Summarize the following content into key points. "
+            "Preserve critical details, decisions, file paths, and errors. "
+            "Be concise.\n\n" + middle[:30_000]
+        )
+        summary = invoke_codex(summary_prompt, cwd, effort="medium", model=FAST_MODEL)
+        if summary:
+            omitted = tokens - max_tokens
+            return (
+                head
+                + f"\n\n[--- SUMMARIZED MIDDLE ({omitted} tokens omitted) ---]\n"
+                + summary
+                + "\n[--- END SUMMARY ---]\n\n"
+                + tail
+            )
+
+    # Fallback: marker only
+    return head + f"\n\n[... {len(middle)} chars omitted ...]\n\n" + tail
 
 
 # ---------------------------------------------------------------------------
@@ -175,35 +235,6 @@ def _file_heuristics(file_path: str) -> list[str]:
     return focuses
 
 
-def _diff_heuristics(stat_section: str, diff_section: str) -> list[str]:
-    """Return review focus areas based on diff characteristics.
-
-    stat_section: output of `git diff --stat HEAD` (separated before concatenation)
-    diff_section: output of `git diff HEAD`
-    """
-    focuses: list[str] = []
-    diff_lines = diff_section.count("\n")
-    # Count files from stat section only (each file line has ' | ')
-    files_changed = sum(1 for line in stat_section.splitlines() if " | " in line)
-    if diff_lines > 500:
-        focuses.append(
-            "LARGE DIFF: Prioritize structural/architectural review over line-by-line."
-        )
-    elif diff_lines < 20:
-        focuses.append(
-            "SMALL DIFF: Focus on correctness details, off-by-one, boundary conditions."
-        )
-    if files_changed > 10:
-        focuses.append(
-            "MANY FILES: Check for incomplete refactors, inconsistent renames, orphaned references."
-        )
-    if "+++ /dev/null" in diff_section or "--- /dev/null" in diff_section:
-        focuses.append(
-            "FILE CREATION/DELETION: Verify cleanup of imports, references, and config entries."
-        )
-    return focuses
-
-
 def _change_size_heuristics(content: str, old: str, new: str) -> list[str]:
     """Return review focus based on change magnitude."""
     focuses: list[str] = []
@@ -277,7 +308,7 @@ _CATEGORY_DEFAULTS: dict[str, tuple[str, str]] = {
     "code_change": (DEFAULT_MODEL, "low"),
     "plan_review": (DEFAULT_MODEL, "xhigh"),
     "thinking": (DEFAULT_MODEL, "medium"),
-    "bash_failure": (FAST_MODEL, "high"),
+    "bash_failure": (FAST_MODEL, "medium"),
 }
 
 
@@ -289,21 +320,22 @@ def classify(tool_name: str, hook_event: str) -> tuple[str, str, str] | None:
             return ("bash_failure", model, effort)
         return None
 
-    # Exact match → category
+    # Exact match → category → MCP fallback → skip
     cat = _TOOL_ROUTES.get(tool_name)
-    if cat is None and tool_name in _SKIP_TOOLS:
-        return None
-    if cat is None and tool_name.startswith("mcp__"):
-        if any(m in tool_name for m in _MCP_EDIT_MARKERS):
-            cat = "code_change"
-        elif any(m in tool_name for m in _MCP_THINKING_MARKERS):
-            cat = "thinking"
-        else:
-            debug(f"unknown MCP tool skipped: {tool_name}")
-            return None
     if cat is None:
-        debug(f"unknown tool skipped: {tool_name}")
-        return None
+        if tool_name in _SKIP_TOOLS:
+            return None
+        if tool_name.startswith("mcp__"):
+            if any(m in tool_name for m in _MCP_EDIT_MARKERS):
+                cat = "code_change"
+            elif any(m in tool_name for m in _MCP_THINKING_MARKERS):
+                cat = "thinking"
+            else:
+                debug(f"unknown MCP tool skipped: {tool_name}")
+                return None
+        else:
+            debug(f"unknown tool skipped: {tool_name}")
+            return None
 
     model, effort = _CATEGORY_DEFAULTS[cat]
     return (cat, model, effort)
@@ -334,45 +366,6 @@ def _gate_model_effort(
         return FAST_MODEL, "high"
 
     return model, effort
-
-
-# ---------------------------------------------------------------------------
-# Git helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_git_diff(cwd: str) -> tuple[str, str]:
-    """Get git diff for review. Returns (stat, diff) or ('', '')."""
-    try:
-        r = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            cwd=cwd,
-        )
-        if r.returncode != 0:
-            return ("", "")
-
-        stat = subprocess.run(
-            ["git", "diff", "--stat", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=cwd,
-        ).stdout.strip()
-
-        diff = subprocess.run(
-            ["git", "diff", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=cwd,
-        ).stdout.strip()
-
-        return (stat, diff[:MAX_CONTENT])
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return ("", "")
 
 
 # ---------------------------------------------------------------------------
@@ -469,12 +462,12 @@ def _find_plan_for_session(hook_data: dict) -> tuple[str, str] | None:
     if plan_path:
         if plan_content:
             debug("plan from tool_response path + hook content (zero I/O)")
-            return (plan_path, plan_content[:MAX_CONTENT])
+            return (plan_path, plan_content)
         # Path found but no content in hook data — read from disk
         try:
             content = Path(plan_path).read_text(errors="replace")
             debug("plan from tool_response path + disk read")
-            return (plan_path, content[:MAX_CONTENT])
+            return (plan_path, content)
         except OSError as exc:
             debug(f"cannot read plan at {plan_path}: {exc}")
 
@@ -483,7 +476,7 @@ def _find_plan_for_session(hook_data: dict) -> tuple[str, str] | None:
         session_id = hook_data.get("session_id", "unknown")
         synthetic = f"<plan:session:{session_id}>"
         debug(f"plan from hook content with synthetic path: {synthetic}")
-        return (synthetic, plan_content[:MAX_CONTENT])
+        return (synthetic, plan_content)
 
     # Last resort: global mtime fallback
     debug("falling back to global mtime plan discovery")
@@ -503,7 +496,7 @@ def _find_latest_plan_global() -> tuple[str, str] | None:
     debug(f"found plan (global mtime): {latest}")
     try:
         content = latest.read_text(errors="replace")
-        return (str(latest), content[:MAX_CONTENT])
+        return (str(latest), content)
     except OSError as exc:
         debug(f"cannot read plan: {exc}")
         return None
@@ -568,22 +561,20 @@ def invoke_codex(prompt: str, cwd: str, effort: str = "medium", model: str = "")
 # ---------------------------------------------------------------------------
 
 
-def build_code_review_prompt(tool_name: str, tool_input: dict) -> str:
+def build_code_review_prompt(tool_name: str, tool_input: dict, cwd: str = "") -> str:
     file_path = tool_input.get("file_path", tool_input.get("path", "unknown"))
     content = tool_input.get("content", "")
     old = tool_input.get("old_string", "")
     new = tool_input.get("new_string", "")
 
-    # Build snippet with redaction
+    # Build snippet with redaction + smart truncation
     if content:
-        snippet = _redact(content[:MAX_CONTENT])
+        snippet = _smart_truncate(_redact(content), cwd=cwd)
     elif old or new:
-        snippet = (
-            f"--- old ---\n{_redact(old[: MAX_CONTENT // 2])}\n"
-            f"--- new ---\n{_redact(new[: MAX_CONTENT // 2])}"
-        )
+        snippet = f"--- old ---\n{_redact(old)}\n--- new ---\n{_redact(new)}"
+        snippet = _smart_truncate(snippet, cwd=cwd)
     else:
-        snippet = _redact(json.dumps(tool_input, indent=2)[:MAX_CONTENT])
+        snippet = _smart_truncate(_redact(json.dumps(tool_input, indent=2)), cwd=cwd)
 
     # Dynamic heuristic sections
     extra_focus = _file_heuristics(file_path) + _change_size_heuristics(
@@ -646,7 +637,9 @@ def build_thinking_prompt(tool_name: str, tool_input: dict) -> str:
             "carried forward? Should the approach pivot?"
         )
 
-    sandboxed = _sandbox_content("reasoning-step", _redact(text[:MAX_CONTENT]))
+    sandboxed = _sandbox_content(
+        "reasoning-step", _smart_truncate(_redact(text), max_tokens=25_000)
+    )
 
     return (
         f"""You are a metacognitive critic. Challenge this reasoning step.
@@ -703,7 +696,7 @@ def build_bash_failure_prompt(tool_input: dict, error: str) -> str:
         f"""A bash command failed. Perform structured root cause analysis.
 
 Command: {_redact(command)}
-Error: {_redact(error[:MAX_CONTENT])}
+Error: {_smart_truncate(_redact(error), max_tokens=5_000)}
 {extra_block}
 
 Analyze:
@@ -718,8 +711,10 @@ Be concise and actionable."""
     )
 
 
-def build_plan_review_prompt(plan_content: str, plan_path: str) -> str:
-    sandboxed = _sandbox_content("plan", _redact(plan_content))
+def build_plan_review_prompt(plan_content: str, plan_path: str, cwd: str = "") -> str:
+    sandboxed = _sandbox_content(
+        "plan", _smart_truncate(_redact(plan_content), cwd=cwd)
+    )
 
     return (
         f"""You are an adversarial plan reviewer. Be terse and actionable.
@@ -739,9 +734,11 @@ If FAIL, each bullet must state: <Category>: <Brief problem>. Fix: <Specific act
     )
 
 
-def build_subagent_review_prompt(agent_type: str, transcript_tail: str) -> str:
+def build_subagent_review_prompt(
+    agent_type: str, transcript_tail: str, cwd: str = ""
+) -> str:
     sandboxed = _sandbox_content(
-        "subagent-transcript", _redact(transcript_tail[:MAX_CONTENT])
+        "subagent-transcript", _smart_truncate(_redact(transcript_tail), cwd=cwd)
     )
 
     return (
@@ -760,28 +757,14 @@ If FAIL, each bullet must state: <Issue>: <Brief problem>. Fix: <Specific action
     )
 
 
-def build_stop_review_prompt(
-    transcript_tail: str, git_context: str, stat: str, diff: str
-) -> str:
-    sections: list[str] = []
-    if transcript_tail:
-        sections.append(
-            _sandbox_content("transcript", _redact(transcript_tail[:15000]))
-        )
-    if git_context:
-        sections.append(_sandbox_content("git-diff", _redact(git_context[:15000])))
-    context = "\n\n".join(sections)
+def build_stop_review_prompt(transcript_content: str, cwd: str = "") -> str:
+    truncated = _smart_truncate(_redact(transcript_content), cwd=cwd)
+    sandboxed = _sandbox_content("transcript", truncated)
 
-    # Dynamic focus from separated stat/diff sections
-    extra = _diff_heuristics(stat, diff) if (stat or diff) else []
-    if len(transcript_tail) > 15000:
+    extra: list[str] = []
+    if _count_tokens(transcript_content) > 10_000:
         extra.append(
             "LONG SESSION: Verify early requirements weren't lost or forgotten during extended work."
-        )
-    if not stat and not diff:
-        extra.append(
-            "NO CODE CHANGES: If the task required code changes, this is suspicious "
-            "-- verify the agent actually did the work."
         )
 
     extra_block = ""
@@ -791,7 +774,7 @@ def build_stop_review_prompt(
     return (
         f"""You are a session reviewer. Be terse and actionable.
 
-{context}
+{sandboxed}
 {extra_block}
 
 Evaluate: logic integrity, architecture consistency, design tidiness, memory sanity, concurrency correctness.
@@ -805,13 +788,14 @@ If FAIL, each bullet must state: <Category>: <Brief problem>. Fix: <Specific act
     )
 
 
-def build_precompact_prompt(transcript_tail: str) -> str:
+def build_precompact_prompt(transcript_content: str, cwd: str = "") -> str:
+    truncated = _smart_truncate(transcript_content, cwd=cwd)
     return (
         f"""You are summarizing critical session context before compaction.
 The following is the tail of the conversation transcript.
 
 ```
-{transcript_tail}
+{truncated}
 ```
 
 Summarize the critical context that MUST survive compaction:
@@ -927,13 +911,35 @@ _VERDICT_PREFIX: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Output compaction
+# ---------------------------------------------------------------------------
+
+_COMPACT_THRESHOLD = 1500  # chars — trigger compaction above this
+
+
+def _compact_output(text: str, cwd: str) -> str:
+    """Re-summarize verbose Codex verdict output into bullet points using FAST_MODEL."""
+    if not text or len(text) <= _COMPACT_THRESHOLD:
+        return text
+    prompt = (
+        "Compress this review into ≤5 bullet points. "
+        "First line MUST be the verdict (PASS or FAIL). "
+        "Each bullet: <Category>: <Problem>. Fix: <Action>.\n\n"
+        + _smart_truncate(text, max_tokens=3000)
+    )
+    result = invoke_codex(prompt, cwd, effort="medium", model=FAST_MODEL)
+    return result if result else text  # fail-open
+
+
+# ---------------------------------------------------------------------------
 # Response builders
 # ---------------------------------------------------------------------------
 
 
 def respond_code_review(
-    session_id: str, tool_name: str, tool_input: dict, raw_output: str
+    session_id: str, tool_name: str, tool_input: dict, raw_output: str, cwd: str = ""
 ) -> dict:
+    raw_output = _compact_output(raw_output, cwd) if raw_output else raw_output
     verdict = parse_verdict(raw_output) if raw_output else "UNCERTAIN"
     file_path = tool_input.get("file_path", tool_input.get("path", "unknown"))
 
@@ -943,18 +949,24 @@ def respond_code_review(
         clear_fail_state(session_id, file_path)
     # UNCERTAIN: no state change (preserves prior FAIL if any)
 
-    return {
-        "systemMessage": f"Codex Reflector {_VERDICT_PREFIX[verdict]} [{file_path}]:\n{raw_output[:MAX_OUTPUT]}"
-    }
+    output = _smart_truncate(raw_output, max_tokens=MAX_OUTPUT_TOKENS)
+    prefix = _VERDICT_PREFIX[verdict]
+    if verdict == "UNCERTAIN":
+        return {
+            "decision": "block",
+            "reason": f"Codex Reflector {prefix} [{file_path}]:\n{output}",
+        }
+    return {"systemMessage": f"Codex Reflector {prefix} [{file_path}]:\n{output}"}
 
 
 def respond_thinking(raw_output: str) -> dict:
     if not raw_output:
         return {}
+    output = _smart_truncate(raw_output, max_tokens=MAX_OUTPUT_TOKENS)
     return {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            "additionalContext": f"Codex Metacognition:\n{raw_output[:MAX_OUTPUT]}",
+            "additionalContext": f"Codex Metacognition:\n{output}",
         }
     }
 
@@ -962,10 +974,14 @@ def respond_thinking(raw_output: str) -> dict:
 def respond_bash_failure(raw_output: str) -> dict:
     if not raw_output:
         return {}
-    return {"systemMessage": f"Codex Diagnostic:\n{raw_output[:1500]}"}
+    output = _smart_truncate(raw_output, max_tokens=MAX_OUTPUT_TOKENS)
+    return {"systemMessage": f"Codex Diagnostic:\n{output}"}
 
 
-def respond_plan_review(session_id: str, plan_path: str, raw_output: str) -> dict:
+def respond_plan_review(
+    session_id: str, plan_path: str, raw_output: str, cwd: str = ""
+) -> dict:
+    raw_output = _compact_output(raw_output, cwd) if raw_output else raw_output
     verdict = parse_verdict(raw_output) if raw_output else "UNCERTAIN"
 
     if verdict == "FAIL":
@@ -974,25 +990,34 @@ def respond_plan_review(session_id: str, plan_path: str, raw_output: str) -> dic
         clear_fail_state(session_id, plan_path)
     # UNCERTAIN: no state change (preserves prior FAIL if any)
 
-    return {
-        "systemMessage": f"Codex Plan Review {_VERDICT_PREFIX[verdict]} [{plan_path}]:\n{raw_output[:MAX_OUTPUT]}"
-    }
+    output = _smart_truncate(raw_output, max_tokens=MAX_OUTPUT_TOKENS)
+    prefix = _VERDICT_PREFIX[verdict]
+    if verdict == "UNCERTAIN":
+        return {
+            "decision": "block",
+            "reason": f"Codex Plan Review {prefix} [{plan_path}]:\n{output}",
+        }
+    return {"systemMessage": f"Codex Plan Review {prefix} [{plan_path}]:\n{output}"}
 
 
-def respond_subagent_review(raw_output: str) -> dict | None:
+def respond_subagent_review(raw_output: str, cwd: str = "") -> dict | None:
     if not raw_output:
         return None
+    raw_output = _compact_output(raw_output, cwd)
     verdict = parse_verdict(raw_output)
+    output = _smart_truncate(raw_output, max_tokens=MAX_OUTPUT_TOKENS)
     if verdict == "FAIL":
         return {
             "decision": "block",
-            "reason": f"Codex Subagent Review FAIL:\n{raw_output[:MAX_OUTPUT]}",
+            "reason": f"Codex Subagent Review FAIL:\n{output}",
         }
     if verdict == "PASS":
-        return {
-            "systemMessage": f"Codex Subagent Review PASS:\n{raw_output[:MAX_OUTPUT]}"
-        }
-    return None  # UNCERTAIN: allow silently
+        return {"systemMessage": f"Codex Subagent Review PASS:\n{output}"}
+    # UNCERTAIN: fail-closed — block
+    return {
+        "decision": "block",
+        "reason": f"Codex Subagent Review UNCERTAIN:\n{output}",
+    }
 
 
 def respond_stop(hook_data: dict, cwd: str, effort: str, model: str) -> dict | None:
@@ -1010,38 +1035,38 @@ def respond_stop(hook_data: dict, cwd: str, effort: str, model: str) -> dict | N
         debug(f"blocking stop: {len(fails)} fails")
         return {"decision": "block", "reason": reason}
 
-    # 3. Active review: gather context
+    # 3. Read full transcript (no git diff — transcript contains all changes)
     transcript_path = hook_data.get("transcript_path", "")
-
-    stat, diff = _get_git_diff(cwd)
-
-    if not transcript_path and not stat and not diff:
-        debug("no transcript/diff available, approving stop")
+    transcript = _read_tail(transcript_path, max_bytes=500_000)
+    if not transcript:
+        debug("no transcript available, approving stop")
         return None  # fail-open
 
     # 4. Invoke codex for work review
-    git_context = ""
-    if stat or diff:
-        git_context = f"--- git diff --stat ---\n{stat}\n\n--- git diff ---\n{diff}"
-    prompt = build_stop_review_prompt(transcript_path, git_context, stat, diff)
+    prompt = build_stop_review_prompt(transcript, cwd=cwd)
     raw_output = invoke_codex(prompt, cwd, effort, model)
 
     if not raw_output:
         debug("codex returned empty, approving stop (fail-open)")
         return None
 
-    # 5. Parse verdict
+    # 5. Parse verdict + compact output
+    raw_output = _compact_output(raw_output, cwd)
     verdict = parse_verdict(raw_output)
+    output = _smart_truncate(raw_output, max_tokens=MAX_OUTPUT_TOKENS)
     if verdict == "FAIL":
         return {
             "decision": "block",
-            "reason": f"Codex Stop Review FAIL:\n{raw_output[:MAX_OUTPUT]}",
+            "reason": f"Codex Stop Review FAIL:\n{output}",
         }
-    elif verdict == "PASS":
-        return {"systemMessage": f"Codex Stop Review PASS:\n{raw_output[:MAX_OUTPUT]}"}
-    else:  # UNCERTAIN
-        debug("stop review UNCERTAIN, allowing silently")
-        return None
+    if verdict == "PASS":
+        return {"systemMessage": f"Codex Stop Review PASS:\n{output}"}
+    # UNCERTAIN: fail-closed — block
+    debug("stop review UNCERTAIN, blocking (fail-closed)")
+    return {
+        "decision": "block",
+        "reason": f"Codex Stop Review UNCERTAIN:\n{output}",
+    }
 
 
 def respond_precompact(
@@ -1052,21 +1077,19 @@ def respond_precompact(
         debug("no transcript_path, skipping precompact")
         return None
 
-    # Intentional: Do not limit the size of the transcript
-    # transcript_tail = _read_tail(transcript_path, max_bytes=30_000)
-    # if not transcript_tail:
-    #     debug("cannot read transcript, skipping precompact")
-    #     return None
+    transcript = _read_tail(transcript_path, max_bytes=500_000)
+    if not transcript:
+        debug("cannot read transcript, skipping precompact")
+        return None
 
-    prompt = build_precompact_prompt(transcript_path)
+    prompt = build_precompact_prompt(transcript, cwd=cwd)
     raw_output = invoke_codex(prompt, cwd, effort, model)
     if not raw_output:
         return None
 
     # PreCompact doesn't support hookSpecificOutput -- use systemMessage
-    return {
-        "systemMessage": f"Critical context summary (by Codex):\n{raw_output[:3000]}"
-    }
+    output = _smart_truncate(raw_output, max_tokens=MAX_OUTPUT_TOKENS)
+    return {"systemMessage": f"Critical context summary (by Codex):\n{output}"}
 
 
 # ---------------------------------------------------------------------------
@@ -1217,9 +1240,9 @@ def main() -> None:
         transcript_tail = _read_tail(hook_data.get("agent_transcript_path", ""))
         if not transcript_tail:
             sys.exit(0)
-        prompt = build_subagent_review_prompt(agent_type, transcript_tail)
+        prompt = build_subagent_review_prompt(agent_type, transcript_tail, cwd=cwd)
         raw = invoke_codex(prompt, cwd, "high", DEFAULT_MODEL)
-        result = respond_subagent_review(raw)
+        result = respond_subagent_review(raw, cwd=cwd)
 
     elif event == "PreCompact":
         result = respond_precompact(hook_data, cwd, "high", DEFAULT_MODEL)
@@ -1229,7 +1252,6 @@ def main() -> None:
         routed = classify(tool_name, event)
         if routed is None:
             sys.exit(0)
-            return
         category, model, effort = routed
         tool_input = hook_data.get("tool_input", {})
 
@@ -1240,18 +1262,19 @@ def main() -> None:
         error = hook_data.get("error", "")
 
         if category == "code_change":
-            prompt = build_code_review_prompt(tool_name, tool_input)
+            prompt = build_code_review_prompt(tool_name, tool_input, cwd=cwd)
             raw = invoke_codex(prompt, cwd, effort, model)
-            result = respond_code_review(session_id, tool_name, tool_input, raw)
+            result = respond_code_review(
+                session_id, tool_name, tool_input, raw, cwd=cwd
+            )
         elif category == "plan_review":
             plan = _find_plan_for_session(hook_data)
             if plan is None:
                 sys.exit(0)
-                return
             plan_path, plan_content = plan
-            prompt = build_plan_review_prompt(plan_content, plan_path)
+            prompt = build_plan_review_prompt(plan_content, plan_path, cwd=cwd)
             raw = invoke_codex(prompt, cwd, effort, model)
-            result = respond_plan_review(session_id, plan_path, raw)
+            result = respond_plan_review(session_id, plan_path, raw, cwd=cwd)
         elif category == "thinking":
             prompt = build_thinking_prompt(tool_name, tool_input)
             raw = invoke_codex(prompt, cwd, effort, model)
@@ -1265,8 +1288,11 @@ def main() -> None:
         debug(f"unhandled event: {event}")
         sys.exit(0)
 
-    # Output
+    # Output: exit 2 = blocking (FAIL/UNCERTAIN), exit 0 = ok (PASS/no result)
     if result:
+        if result.get("decision") == "block":
+            print(json.dumps(result), file=sys.stderr)
+            sys.exit(2)
         print(json.dumps(result))
     sys.exit(0)
 
