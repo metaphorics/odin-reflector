@@ -109,14 +109,14 @@ Individual review FAIL/UNCERTAIN results exit with code 1 (non-blocking, silent)
 | 2 | Blocking error — stderr fed to Claude |
 | Other | Non-blocking error — continues |
 
-### Decision control by event
+### Decision control (events this plugin uses)
 
 | Events | Pattern | Key fields |
 |:-------|:--------|:-----------|
 | PostToolUse, Stop | Top-level `decision` | `decision: "block"`, `reason` |
-| PreToolUse | `hookSpecificOutput` | `permissionDecision` (allow/deny/ask) |
+| PostToolUse | `hookSpecificOutput` | `additionalContext` (thinking tools) |
 
-### Event input fields (used by this plugin)
+### Event input fields
 
 | Event | Fields consumed |
 |:------|:----------------|
@@ -131,4 +131,3 @@ Individual review FAIL/UNCERTAIN results exit with code 1 (non-blocking, silent)
 - `decision: "block"` + `reason` — blocks Claude, continues with reason (Stop event)
 - `systemMessage` — warning shown to user (PostToolUse, Stop, PreCompact)
 - `hookSpecificOutput.additionalContext` — injected into Claude context (thinking tools)
-- `suppressOutput` — hides stdout from verbose mode (not currently used)
