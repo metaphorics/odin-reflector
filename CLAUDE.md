@@ -115,6 +115,53 @@ Before invoking Codex for code reviews, a SHA-256 hash of `(tool_name, file_path
 | `CODEX_REFLECTOR_MODEL` | — | Override model for all Codex calls |
 | `CODEX_REFLECTOR_DEBUG` | `"0"` | Set `"1"` for stderr diagnostics |
 
+## Invariants
+
+Cross-cutting rules where breaking the coupling silently corrupts state.
+
+### Dedup ↔ fail-state coupling
+
+`_check_dedup()` cache hits must update fail-state so Stop sees correct state. PASS hits call `clear_fail_state()` then `sys.exit(0)`. FAIL/UNCERTAIN hits call `write_fail_state()` then re-surface a cached message. Note: this is intentionally more aggressive than `respond_code_review()`, where UNCERTAIN is a no-op. The dedup path writes state for cached UNCERTAIN to ensure Stop sees it even when Codex is not re-invoked.
+
+### Asymmetric fail semantics
+
+PostToolUse is fail-open: UNCERTAIN → exit 0, non-blocking feedback. Stop is fail-closed: UNCERTAIN → exit 2, blocking. Rationale: individual reviews are advisory; only the Stop accumulation checkpoint blocks.
+
+### Verdict-before-compact ordering
+
+`parse_verdict()` must run BEFORE `_compact_output()` in every `respond_*()` function. Compaction rewrites text via Codex summarization and can strip or reformat verdict lines.
+
+### PASS dedup early exit
+
+PASS cache hit calls `sys.exit(0)` immediately — no `respond_*()`, no JSON output. Logic after the dedup check block never executes for cached PASSes.
+
+### UNCERTAIN preserves prior state (non-dedup path)
+
+In `respond_code_review()`, `respond_plan_review()`, and `respond_subagent_review()`, UNCERTAIN is explicitly a no-op for fail-state — it preserves any prior FAIL. Changing this to clear state would hide unresolved FAILs from Stop.
+
+## Gotchas
+
+- **Verdict window**: `parse_verdict()` scans first 5 lines only. Buried verdicts → UNCERTAIN. Prompts must put PASS/FAIL on first line.
+- **Model override precedence**: `CODEX_REFLECTOR_MODEL` env var overrides ALL model selections including adaptive gating.
+- **Fast model effort floor**: FAST_MODEL/LIGHTNING_FAST auto-bumps effort to at least "high".
+- **Plan path silent rejection**: `_validate_plan_path()` returns None with no error (DEBUG-only). Rejection of one candidate does not prevent review — the 4-level fallback chain may still find a different plan.
+- **Matryoshka recursion**: up to 3 layers, each calls `invoke_codex()` (100s timeout). Worst case: 300s for one compaction.
+- **Stop loop prevention**: `stop_hook_active` flag check at entry. Commented-out SubagentStop block needs same guard if re-enabled.
+- **`_exit` key discipline**: blocking requires `_exit: 2` or `decision: "block"`. Omitting both → silent exit 0 (approves).
+
+## Fail-open / fail-closed map
+
+| Path | Behavior | Rationale |
+|:-----|:---------|:----------|
+| `invoke_codex()` timeout/error | fail-open (returns `""`) | Never block on infra failure |
+| `parse_verdict()` empty input | UNCERTAIN | Preserves existing state |
+| PostToolUse UNCERTAIN | exit 0 (non-blocking) | Individual reviews are advisory |
+| Stop UNCERTAIN | exit 2 (blocking) | Checkpoint must be conservative |
+| `_check_dedup()` cache error | fail-open (cache miss → fresh review) | Cache is optimization, not correctness |
+| `_matryoshka_compact()` failure | fail-open (truncates to max_chars) | Degraded but functional |
+| `_validate_plan_path()` invalid | silent rejection of that candidate (fallback continues) | Security boundary |
+| stdin JSON parse error | `sys.exit(0)` | Never block on malformed input |
+
 ## Hooks reference (project-relevant subset)
 
 ### Exit codes (hook → Claude Code)
