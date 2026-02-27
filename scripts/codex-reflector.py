@@ -35,8 +35,8 @@ MAX_COMPACT_CHARS = (
 )
 STATE_DIR = Path("/tmp")
 DEFAULT_MODEL = "gpt-5.3-codex"
+LIGHTNING_FAST_MODEL = "gpt-5.3-codex-spark"  # Really fast but only 128k context window; Use as high or xhigh effort.
 FAST_MODEL = "gpt-5.1-codex-mini"
-
 
 # Compact output directives — verdict vs non-verdict prompts.
 _COMPACT_VERDICT = """
@@ -104,7 +104,7 @@ def _read_tail(path: str, max_bytes: int = 20_000) -> str:
 def _smart_truncate(
     text: str, max_chars: int = MAX_COMPACT_CHARS, cwd: str = ""
 ) -> str:
-    """HEAD~SUMMARY~TAIL compaction with FAST_MODEL middle summarization."""
+    """HEAD~SUMMARY~TAIL compaction with LIGHTNING_FAST_MODEL middle summarization."""
     if not text or len(text) <= max_chars:
         return text
 
@@ -115,14 +115,14 @@ def _smart_truncate(
     tail = text[-tail_chars:] if tail_chars else ""
     middle = text[head_chars:-tail_chars] if tail_chars else text[head_chars:]
 
-    # Summarize middle with FAST_MODEL when cwd available
+    # Summarize middle with LIGHTNING_FAST_MODEL when cwd available
     if cwd and len(middle) > 500:
         summary_prompt = (
             "Summarize the following content into key points. "
             "Preserve critical details, decisions, file paths, and errors. "
             "Be concise.\n\n" + middle[:30_000]
         )
-        summary = invoke_codex(summary_prompt, cwd, effort="medium", model=FAST_MODEL)
+        summary = invoke_codex(summary_prompt, cwd, effort="high", model=LIGHTNING_FAST_MODEL)
         if summary:
             return (
                 head
@@ -286,8 +286,8 @@ _MCP_THINKING_MARKERS: tuple[str, ...] = (
 _CATEGORY_DEFAULTS: dict[str, tuple[str, str]] = {
     "code_change": (DEFAULT_MODEL, "low"),
     "plan_review": (DEFAULT_MODEL, "xhigh"),
-    "thinking": (DEFAULT_MODEL, "medium"),
-    "bash_failure": (FAST_MODEL, "medium"),
+    "thinking": (LIGHTNING_FAST_MODEL, "high"),
+    "bash_failure": (LIGHTNING_FAST_MODEL, "high"),
 }
 
 
@@ -340,9 +340,9 @@ def _gate_model_effort(
     if size > 5000:
         return DEFAULT_MODEL, "medium"
 
-    # Tiny change → downgrade to FAST_MODEL
+    # Tiny change → downgrade to LIGHTNING_FAST_MODEL
     if old and new and len(new) < 200 and len(old) < 200:
-        return FAST_MODEL, "high"
+        return LIGHTNING_FAST_MODEL, "xhigh"
 
     return model, effort
 
@@ -492,6 +492,8 @@ def invoke_codex(prompt: str, cwd: str, effort: str = "medium", model: str = "")
     model = os.environ.get("CODEX_REFLECTOR_MODEL", model or DEFAULT_MODEL)
     # Fast model always uses high effort
     if model == FAST_MODEL:
+        effort = "high"
+    if model == LIGHTNING_FAST_MODEL and effort in ("low", "medium"):
         effort = "high"
 
     fd, out_path = tempfile.mkstemp(suffix=".txt", prefix="codex-ref-")
@@ -991,9 +993,7 @@ def _record_dedup(
                 # Evict expired + enforce max
                 now = time.time()
                 hashes = {
-                    k: v
-                    for k, v in hashes.items()
-                    if now - v.get("ts", 0) < _DEDUP_TTL
+                    k: v for k, v in hashes.items() if now - v.get("ts", 0) < _DEDUP_TTL
                 }
                 if len(hashes) >= _DEDUP_MAX:
                     oldest_key = min(hashes, key=lambda k: hashes[k].get("ts", 0))
@@ -1021,7 +1021,7 @@ _COMPACT_THRESHOLD = 1500  # chars — trigger compaction above this
 
 
 def _compact_output(text: str, cwd: str) -> str:
-    """Re-summarize verbose Codex verdict output into bullet points using FAST_MODEL."""
+    """Re-summarize verbose Codex verdict output into bullet points using LIGHTNING_FAST_MODEL."""
     if not text or len(text) <= _COMPACT_THRESHOLD:
         return text
     prompt = (
@@ -1030,7 +1030,7 @@ def _compact_output(text: str, cwd: str) -> str:
         "Each bullet: <Category>: <Problem>. Fix: <Action>.\n\n"
         + _smart_truncate(text, max_chars=12_000)
     )
-    result = invoke_codex(prompt, cwd, effort="medium", model=FAST_MODEL)
+    result = invoke_codex(prompt, cwd, effort="high", model=LIGHTNING_FAST_MODEL)
     return result if result else text  # fail-open
 
 
@@ -1369,7 +1369,12 @@ def run_self_test() -> None:
             False,
             "different new_string",
         ),
-        ("Edit", {"path": "c.py", "old_string": "x", "new_string": "y"}, False, "path vs file_path key"),
+        (
+            "Edit",
+            {"path": "c.py", "old_string": "x", "new_string": "y"},
+            False,
+            "path vs file_path key",
+        ),
     ]
     base_hash = _review_hash("Edit", base_input)
     for tool_name, tool_input, should_eq, desc in hash_cases:
@@ -1377,7 +1382,9 @@ def run_self_test() -> None:
         matches = h == base_hash
         ok = matches == should_eq
         status = "OK" if ok else "MISMATCH"
-        print(f"  {status}: _review_hash ({desc}) eq_base={matches} (expected {should_eq})")
+        print(
+            f"  {status}: _review_hash ({desc}) eq_base={matches} (expected {should_eq})"
+        )
         all_total += 1
         if ok:
             all_passed += 1
@@ -1458,9 +1465,12 @@ def main() -> None:
                 )
                 debug(f"dedup hit: {content_hash} → {cached_verdict} [{file_path}]")
                 # Mirror fail-state bookkeeping so Stop sees correct state
-                if cached_verdict == "FAIL":
+                if cached_verdict in ("FAIL", "UNCERTAIN"):
                     write_fail_state(
-                        session_id, tool_name, file_path, "(cached FAIL)"
+                        session_id,
+                        tool_name,
+                        file_path,
+                        f"(cached {cached_verdict})",
                     )
                 elif cached_verdict == "PASS":
                     clear_fail_state(session_id, file_path)

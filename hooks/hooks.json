@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
-            "timeout": 150
+            "timeout": 240
           }
         ]
       }
@@ -19,8 +19,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
-            "timeout": 120,
-            "async": true
+            "timeout": 120
           }
         ]
       }
@@ -31,7 +30,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
-            "timeout": 150
+            "timeout": 240
           }
         ]
       }
@@ -42,7 +41,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
-            "timeout": 150
+            "timeout": 240
           }
         ]
       }
