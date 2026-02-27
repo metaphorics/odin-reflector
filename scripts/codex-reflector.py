@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import namedtuple
 from pathlib import Path
 from typing import Callable
 
@@ -34,9 +35,27 @@ MAX_COMPACT_CHARS = (
     400_000  # ~100K tokens at ~4 chars/token — trigger compaction above this
 )
 STATE_DIR = Path("/tmp")
-DEFAULT_MODEL = "gpt-5.3-codex"
-LIGHTNING_FAST_MODEL = "gpt-5.3-codex-spark"  # Really fast but only 128k context window; Use as high or xhigh effort.
-FAST_MODEL = "gpt-5.1-codex-mini"
+DEFAULT_MODEL = "gpt-5.3-codex"  # 400k context window
+LIGHTNING_FAST_MODEL = "gpt-5.3-codex-spark"  # 128k context window
+FAST_MODEL = "gpt-5.1-codex-mini"  # 400k context window
+
+# ---------------------------------------------------------------------------
+# Model/effort presets — every (model, effort) pair lives here
+# ---------------------------------------------------------------------------
+
+ModelEffort = namedtuple("ModelEffort", ["model", "effort"])
+
+_ME_CODE_REVIEW = ModelEffort(DEFAULT_MODEL, "medium")             # base: simple changes
+_ME_CODE_REVIEW_HARD = ModelEffort(FAST_MODEL, "high")             # security/test/data file, large, or significant change
+_ME_CODE_REVIEW_COMPLEX = ModelEffort(FAST_MODEL, "xhigh")         # multiple complexity signals
+_ME_CODE_REVIEW_TINY = ModelEffort(LIGHTNING_FAST_MODEL, "xhigh")  # trivial: old+new < 200 chars
+_ME_PLAN_REVIEW = ModelEffort(DEFAULT_MODEL, "xhigh")
+_ME_THINKING = ModelEffort(LIGHTNING_FAST_MODEL, "xhigh")
+_ME_BASH_FAILURE = ModelEffort(LIGHTNING_FAST_MODEL, "high")
+_ME_STOP_REVIEW = ModelEffort(DEFAULT_MODEL, "medium")
+_ME_PRECOMPACT = ModelEffort(DEFAULT_MODEL, "high")
+_ME_SUMMARIZE = ModelEffort(FAST_MODEL, "high")  # _compact_output + _matryoshka_compact
+_ME_SUBAGENT_REVIEW = ModelEffort(DEFAULT_MODEL, "high")  # commented-out SubagentStop
 
 # Compact output directives — verdict vs non-verdict prompts.
 _COMPACT_VERDICT = """
@@ -101,39 +120,40 @@ def _read_tail(path: str, max_bytes: int = 20_000) -> str:
         return ""
 
 
-def _smart_truncate(
-    text: str, max_chars: int = MAX_COMPACT_CHARS, cwd: str = ""
+def _matryoshka_compact(
+    text: str, max_chars: int = MAX_COMPACT_CHARS, cwd: str = "", max_layers: int = 3
 ) -> str:
-    """HEAD~SUMMARY~TAIL compaction with LIGHTNING_FAST_MODEL middle summarization."""
+    """Matryoshka compaction — recursive semantic summarization via FAST_MODEL.
+
+    Each layer produces a complete self-contained summary. Recurses until
+    the result fits within max_chars or max_layers is reached.
+    """
     if not text or len(text) <= max_chars:
         return text
+    if not cwd:
+        return text[:max_chars]  # no cwd = can't invoke codex
 
-    head_chars = int(max_chars * 0.4)
-    tail_chars = int(max_chars * 0.4)
-
-    head = text[:head_chars]
-    tail = text[-tail_chars:] if tail_chars else ""
-    middle = text[head_chars:-tail_chars] if tail_chars else text[head_chars:]
-
-    # Summarize middle with LIGHTNING_FAST_MODEL when cwd available
-    if cwd and len(middle) > 500:
-        summary_prompt = (
-            "Summarize the following content into key points. "
-            "Preserve critical details, decisions, file paths, and errors. "
-            "Be concise.\n\n" + middle[:30_000]
+    current = text
+    for layer in range(max_layers):
+        # Cap input to model's practical context budget (~300k chars)
+        input_chunk = current[:300_000]
+        prompt = (
+            f"Produce a complete, self-contained summary (target ≤{max_chars} chars). "
+            "Preserve ALL: decisions, file paths, errors, code references, state changes, "
+            "and action items. Omit verbose explanations and repetition.\n\n"
+            + input_chunk
         )
-        summary = invoke_codex(summary_prompt, cwd, effort="high", model=LIGHTNING_FAST_MODEL)
-        if summary:
-            return (
-                head
-                + f"\n\n[--- SUMMARIZED MIDDLE ({len(middle)} chars omitted) ---]\n"
-                + summary
-                + "\n[--- END SUMMARY ---]\n\n"
-                + tail
-            )
+        summary = invoke_codex(
+            prompt, cwd, effort=_ME_SUMMARIZE.effort, model=_ME_SUMMARIZE.model
+        )
+        if not summary:
+            return current[:max_chars]  # fail-open
+        if len(summary) <= max_chars:
+            return summary
+        current = summary  # nest: summarize the summary
+        debug(f"matryoshka layer {layer + 1}: {len(summary)} chars (target {max_chars})")
 
-    # Fallback: marker only
-    return head + f"\n\n[... {len(middle)} chars omitted ...]\n\n" + tail
+    return current[:max_chars]  # safety truncation after max layers
 
 
 # ---------------------------------------------------------------------------
@@ -282,12 +302,12 @@ _MCP_THINKING_MARKERS: tuple[str, ...] = (
     "shannonthinking",
 )
 
-# Category → (default_model, default_effort)
-_CATEGORY_DEFAULTS: dict[str, tuple[str, str]] = {
-    "code_change": (DEFAULT_MODEL, "low"),
-    "plan_review": (DEFAULT_MODEL, "xhigh"),
-    "thinking": (LIGHTNING_FAST_MODEL, "high"),
-    "bash_failure": (LIGHTNING_FAST_MODEL, "high"),
+# Category → preset
+_CATEGORY_DEFAULTS: dict[str, ModelEffort] = {
+    "code_change": _ME_CODE_REVIEW,
+    "plan_review": _ME_PLAN_REVIEW,
+    "thinking": _ME_THINKING,
+    "bash_failure": _ME_BASH_FAILURE,
 }
 
 
@@ -328,22 +348,36 @@ def classify(tool_name: str, hook_event: str) -> tuple[str, str, str] | None:
 def _gate_model_effort(
     category: str, model: str, effort: str, tool_input: dict
 ) -> tuple[str, str]:
-    """Upgrade model/effort based on file heuristics."""
+    """Adaptive model/effort based on complexity signals."""
     if category != "code_change":
         return model, effort
 
-    # Large content → force DEFAULT_MODEL
+    file_path = tool_input.get("file_path", tool_input.get("path", ""))
     content = tool_input.get("content", "")
     old = tool_input.get("old_string", "")
     new = tool_input.get("new_string", "")
     size = len(content or new or "")
-    if size > 5000:
-        return DEFAULT_MODEL, "medium"
 
-    # Tiny change → downgrade to LIGHTNING_FAST_MODEL
-    if old and new and len(new) < 200 and len(old) < 200:
-        return LIGHTNING_FAST_MODEL, "xhigh"
+    file_hints = _file_heuristics(file_path)
+    change_hints = _change_size_heuristics(content, old, new)
 
+    # Tiny + no risk signals → lightweight
+    if old and new and len(new) < 200 and len(old) < 200 and not file_hints:
+        return _ME_CODE_REVIEW_TINY
+
+    # Complex: multiple risk signals
+    if len(file_hints) >= 2 or (file_hints and change_hints):
+        return _ME_CODE_REVIEW_COMPLEX
+
+    # Hard: any risk signal or large content
+    if file_hints or change_hints or size > 5000:
+        return _ME_CODE_REVIEW_HARD
+
+    # Medium-sized, no signals → bump effort
+    if size > 1000:
+        return ModelEffort(model, "high")
+
+    # Default base
     return model, effort
 
 
@@ -555,12 +589,12 @@ def build_code_review_prompt(
 
     # Build snippet with redaction + smart truncation
     if content:
-        snippet = _smart_truncate(_redact(content), cwd=cwd)
+        snippet = _matryoshka_compact(_redact(content), cwd=cwd)
     elif old or new:
         snippet = f"--- old ---\n{_redact(old)}\n--- new ---\n{_redact(new)}"
-        snippet = _smart_truncate(snippet, cwd=cwd)
+        snippet = _matryoshka_compact(snippet, cwd=cwd)
     else:
-        snippet = _smart_truncate(_redact(json.dumps(tool_input, indent=2)), cwd=cwd)
+        snippet = _matryoshka_compact(_redact(json.dumps(tool_input, indent=2)), cwd=cwd)
 
     # Extract tool_response context (success/error info from the tool)
     response_context = ""
@@ -609,7 +643,7 @@ If FAIL, each bullet must state: <Category>: <Brief problem>. Fix: <Specific act
     )
 
 
-def build_thinking_prompt(tool_name: str, tool_input: dict) -> str:
+def build_thinking_prompt(tool_name: str, tool_input: dict, cwd: str = "") -> str:
     thought = tool_input.get("thought", "")
     thought_num = tool_input.get("thought_number", tool_input.get("thoughtNumber", 0))
     total = tool_input.get("total_thoughts", tool_input.get("totalThoughts", 0))
@@ -639,7 +673,7 @@ def build_thinking_prompt(tool_name: str, tool_input: dict) -> str:
         )
 
     sandboxed = _sandbox_content(
-        "reasoning-step", _smart_truncate(_redact(text), max_chars=100_000)
+        "reasoning-step", _matryoshka_compact(_redact(text), max_chars=100_000, cwd=cwd)
     )
 
     return (
@@ -667,6 +701,7 @@ def build_bash_failure_prompt(
     tool_input: dict,
     error: str,
     tool_response: dict | str | None = None,
+    cwd: str = "",
 ) -> str:
     command = tool_input.get("command", "unknown")
 
@@ -713,7 +748,7 @@ def build_bash_failure_prompt(
         f"""A bash command failed. Perform structured root cause analysis.
 
 Command: {_redact(command)}
-Error: {_smart_truncate(_redact(error), max_chars=20_000)}{response_info}
+Error: {_matryoshka_compact(_redact(error), max_chars=20_000, cwd=cwd)}{response_info}
 {extra_block}
 
 Analyze:
@@ -730,7 +765,7 @@ Be concise and actionable."""
 
 def build_plan_review_prompt(plan_content: str, plan_path: str, cwd: str = "") -> str:
     sandboxed = _sandbox_content(
-        "plan", _smart_truncate(_redact(plan_content), cwd=cwd)
+        "plan", _matryoshka_compact(_redact(plan_content), cwd=cwd)
     )
 
     return (
@@ -755,7 +790,7 @@ def build_subagent_review_prompt(
     agent_type: str, transcript_tail: str, cwd: str = ""
 ) -> str:
     sandboxed = _sandbox_content(
-        "subagent-transcript", _smart_truncate(_redact(transcript_tail), cwd=cwd)
+        "subagent-transcript", _matryoshka_compact(_redact(transcript_tail), cwd=cwd)
     )
 
     return (
@@ -775,7 +810,7 @@ If FAIL, each bullet must state: <Issue>: <Brief problem>. Fix: <Specific action
 
 
 def build_stop_review_prompt(transcript_content: str, cwd: str = "") -> str:
-    truncated = _smart_truncate(_redact(transcript_content), cwd=cwd)
+    truncated = _matryoshka_compact(_redact(transcript_content), cwd=cwd)
     sandboxed = _sandbox_content("transcript", truncated)
 
     extra: list[str] = []
@@ -806,7 +841,7 @@ If FAIL, each bullet must state: <Category>: <Brief problem>. Fix: <Specific act
 
 
 def build_precompact_prompt(transcript_content: str, cwd: str = "") -> str:
-    truncated = _smart_truncate(transcript_content, cwd=cwd)
+    truncated = _matryoshka_compact(transcript_content, cwd=cwd)
     return (
         f"""You are a metacognition layer reflecting on agent session quality before compaction.
 The following is the tail of the conversation transcript.
@@ -1021,17 +1056,10 @@ _COMPACT_THRESHOLD = 1500  # chars — trigger compaction above this
 
 
 def _compact_output(text: str, cwd: str) -> str:
-    """Re-summarize verbose Codex verdict output into bullet points using LIGHTNING_FAST_MODEL."""
+    """Re-summarize verbose Codex output into bullet points."""
     if not text or len(text) <= _COMPACT_THRESHOLD:
         return text
-    prompt = (
-        "Compress this review into ≤5 bullet points. "
-        "First line MUST be the verdict (PASS or FAIL). "
-        "Each bullet: <Category>: <Problem>. Fix: <Action>.\n\n"
-        + _smart_truncate(text, max_chars=12_000)
-    )
-    result = invoke_codex(prompt, cwd, effort="high", model=LIGHTNING_FAST_MODEL)
-    return result if result else text  # fail-open
+    return _matryoshka_compact(text, max_chars=_COMPACT_THRESHOLD, cwd=cwd)
 
 
 # ---------------------------------------------------------------------------
@@ -1047,8 +1075,8 @@ def respond_code_review(
     cwd: str = "",
     event_name: str = "PostToolUse",
 ) -> dict:
-    raw_output = _compact_output(raw_output, cwd) if raw_output else raw_output
     verdict = parse_verdict(raw_output) if raw_output else "UNCERTAIN"
+    raw_output = _compact_output(raw_output, cwd) if raw_output else raw_output
     file_path = tool_input.get("file_path", tool_input.get("path", "unknown"))
 
     if verdict == "FAIL":
@@ -1102,8 +1130,8 @@ def respond_plan_review(
     cwd: str = "",
     event_name: str = "PostToolUse",
 ) -> dict:
-    raw_output = _compact_output(raw_output, cwd) if raw_output else raw_output
     verdict = parse_verdict(raw_output) if raw_output else "UNCERTAIN"
+    raw_output = _compact_output(raw_output, cwd) if raw_output else raw_output
 
     if verdict == "FAIL":
         write_fail_state(session_id, "ExitPlanMode", plan_path, raw_output)
@@ -1131,8 +1159,8 @@ def respond_subagent_review(
 ) -> dict | None:
     if not raw_output:
         return None
-    raw_output = _compact_output(raw_output, cwd)
     verdict = parse_verdict(raw_output)
+    raw_output = _compact_output(raw_output, cwd)
 
     if verdict == "FAIL":
         write_fail_state(session_id, "SubagentStop", agent_type, raw_output)
@@ -1186,9 +1214,9 @@ def respond_stop(hook_data: dict, cwd: str, effort: str, model: str) -> dict | N
         debug("codex returned empty, approving stop (fail-open)")
         return None
 
-    # 5. Parse verdict + compact output
-    raw_output = _compact_output(raw_output, cwd)
+    # 5. Parse verdict from raw output, then compact for display
     verdict = parse_verdict(raw_output)
+    raw_output = _compact_output(raw_output, cwd)
     if verdict == "FAIL":
         return {
             "decision": "block",
@@ -1423,7 +1451,9 @@ def main() -> None:
     result: dict | None = None
 
     if event == "Stop":
-        result = respond_stop(hook_data, cwd, "medium", DEFAULT_MODEL)
+        result = respond_stop(
+            hook_data, cwd, _ME_STOP_REVIEW.effort, _ME_STOP_REVIEW.model
+        )
 
     # elif event == "SubagentStop":
     #     if hook_data.get("stop_hook_active"):
@@ -1433,11 +1463,13 @@ def main() -> None:
     #     if not transcript_tail:
     #         sys.exit(0)
     #     prompt = build_subagent_review_prompt(agent_type, transcript_tail, cwd=cwd)
-    #     raw = invoke_codex(prompt, cwd, "high", DEFAULT_MODEL)
+    #     raw = invoke_codex(prompt, cwd, _ME_SUBAGENT_REVIEW.effort, _ME_SUBAGENT_REVIEW.model)
     #     result = respond_subagent_review(session_id, agent_type, raw, cwd=cwd)
 
     elif event == "PreCompact":
-        result = respond_precompact(hook_data, cwd, "high", DEFAULT_MODEL)
+        result = respond_precompact(
+            hook_data, cwd, _ME_PRECOMPACT.effort, _ME_PRECOMPACT.model
+        )
 
     elif event in ("PostToolUse", "PostToolUseFailure"):
         tool_name = hook_data.get("tool_name", "")
@@ -1508,12 +1540,12 @@ def main() -> None:
                 session_id, plan_path, raw, cwd=cwd, event_name=event
             )
         elif category == "thinking":
-            prompt = build_thinking_prompt(tool_name, tool_input)
+            prompt = build_thinking_prompt(tool_name, tool_input, cwd=cwd)
             raw = invoke_codex(prompt, cwd, effort, model)
             result = respond_thinking(raw, event_name=event)
         elif category == "bash_failure":
             prompt = build_bash_failure_prompt(
-                tool_input, error, tool_response=tool_response
+                tool_input, error, tool_response=tool_response, cwd=cwd
             )
             raw = invoke_codex(prompt, cwd, effort, model)
             result = respond_bash_failure(raw, event_name=event)
