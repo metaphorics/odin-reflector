@@ -1222,11 +1222,7 @@ def respond_subagent_review(
     prefix = _VERDICT_PREFIX[verdict]
     msg = f"Codex Subagent Review {prefix}:\n{raw_output}"
     result: dict = {"systemMessage": msg}
-    if verdict in ("FAIL", "UNCERTAIN"):
-        result["hookSpecificOutput"] = {
-            "hookEventName": event_name,
-            "additionalContext": f"Codex Subagent Review {prefix}:\n{raw_output}",
-        }
+    # SubagentStop doesn't support hookSpecificOutput — systemMessage only
     return result
 
 
@@ -1277,10 +1273,6 @@ def respond_stop(hook_data: dict, cwd: str, effort: str, model: str) -> dict | N
     if verdict == "PASS":
         return {
             "systemMessage": f"Codex Stop Review PASS:\n{raw_output}",
-            "hookSpecificOutput": {
-                "hookEventName": "Stop",
-                "additionalContext": f"Codex Stop Review PASS:\n{raw_output}",
-            },
         }
     # UNCERTAIN: fail-closed — block
     debug("stop review UNCERTAIN, blocking (fail-closed)")

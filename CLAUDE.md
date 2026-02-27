@@ -148,6 +148,7 @@ In `respond_code_review()`, `respond_plan_review()`, and `respond_subagent_revie
 - **Matryoshka recursion**: up to 3 layers, each calls `invoke_codex()` (100s timeout). Worst case: 300s for one compaction.
 - **Stop loop prevention**: `stop_hook_active` flag check at entry. Commented-out SubagentStop block needs same guard if re-enabled.
 - **`_exit` key discipline**: blocking requires `_exit: 2` or `decision: "block"`. Omitting both → silent exit 0 (approves).
+- **hookSpecificOutput event scope**: Only `PostToolUse`, `PostToolUseFailure`, `PreToolUse`, and `UserPromptSubmit` support `hookSpecificOutput` in their JSON output schema. Stop, SubagentStop, PreCompact, and other events reject it with a validation error. Use `systemMessage` for user-visible feedback on those events, and `decision`/`reason` for blocking.
 
 ## Fail-open / fail-closed map
 
