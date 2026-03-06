@@ -35,6 +35,7 @@ MAX_COMPACT_CHARS = (
     400_000  # ~100K tokens at ~4 chars/token — trigger compaction above this
 )
 STATE_DIR = Path("/tmp")
+_SYNTHETIC_PREFIX = "synthetic::"  # Readability convention for non-filesystem path identifiers
 DEFAULT_MODEL = "gpt-5.4"  # 1M context window
 LIGHTNING_FAST_MODEL = "gpt-5.3-codex-spark"  # 128k context window
 FAST_MODEL = "gpt-5.1-codex-mini"  # 400k context window
@@ -123,7 +124,8 @@ def _read_tail(path: str, max_bytes: int = 20_000) -> str:
         with open(path, "r", errors="replace") as f:
             if size > max_bytes:
                 f.seek(size - max_bytes)
-                f.readline()  # skip partial first line
+                # Skip partial first line to avoid splitting a line in the middle
+                f.readline()  # skip partial first line (standard tail — incomplete line at seek boundary)
             return f.read()
     except OSError:
         return ""
@@ -403,8 +405,15 @@ _PLANS_DIR = Path.home() / ".claude" / "plans"
 _PLAN_SAVED_RE = re.compile(r"saved to:\s*(/[^\n\"]+\.md)")
 
 
+def _is_synthetic_path(path: str) -> bool:
+    """Check if a plan path is a synthetic (non-filesystem) identifier."""
+    return path.startswith(_SYNTHETIC_PREFIX)
+
+
 def _validate_plan_path(path_str: str) -> str | None:
     """Validate that a plan path is confined to ~/.claude/plans/ and is .md."""
+    if _is_synthetic_path(path_str):
+        return None
     try:
         resolved = Path(path_str).resolve()
         plans_resolved = _PLANS_DIR.resolve()
@@ -488,6 +497,8 @@ def _find_plan_for_session(hook_data: dict) -> tuple[str, str] | None:
             debug("plan from tool_response path + hook content (zero I/O)")
             return (plan_path, plan_content)
         # Path found but no content in hook data — read from disk
+        if _is_synthetic_path(plan_path):
+            raise ValueError(f"synthetic path reached I/O boundary: {plan_path}")
         try:
             content = Path(plan_path).read_text(errors="replace")
             debug("plan from tool_response path + disk read")
@@ -498,7 +509,7 @@ def _find_plan_for_session(hook_data: dict) -> tuple[str, str] | None:
     if plan_content:
         # Content but no path — use synthetic session-keyed path
         session_id = hook_data.get("session_id", "unknown")
-        synthetic = f"<plan:session:{session_id}>"
+        synthetic = f"{_SYNTHETIC_PREFIX}plan:session:{session_id}"
         debug(f"plan from hook content with synthetic path: {synthetic}")
         return (synthetic, plan_content)
 
@@ -1205,9 +1216,9 @@ def respond_subagent_review(
     raw_output: str,
     cwd: str = "",
     event_name: str = "SubagentStop",
-) -> dict | None:
+) -> dict:
     if not raw_output:
-        return None
+        return {}
     verdict = parse_verdict(raw_output)
     raw_output = _compact_output(raw_output, cwd)
 
@@ -1454,6 +1465,33 @@ def run_self_test() -> None:
         print(
             f"  {status}: _review_hash ({desc}) eq_base={matches} (expected {should_eq})"
         )
+        all_total += 1
+        if ok:
+            all_passed += 1
+
+    # --- Synthetic path tests ---
+    print("\n=== Synthetic Path Guards ===")
+    synth_cases = [
+        (
+            "synthetic path detected",
+            _is_synthetic_path(f"{_SYNTHETIC_PREFIX}plan:session:abc"),
+            True,
+        ),
+        (
+            "real path not synthetic",
+            _is_synthetic_path("/home/user/.claude/plans/foo.md"),
+            False,
+        ),
+        (
+            "validate rejects synthetic",
+            _validate_plan_path(f"{_SYNTHETIC_PREFIX}plan:session:abc"),
+            None,
+        ),
+    ]
+    for desc, got, expected in synth_cases:
+        ok = got == expected
+        status = "OK" if ok else "FAIL"
+        print(f"  {status}: {desc}: got={got!r} expected={expected!r}")
         all_total += 1
         if ok:
             all_passed += 1

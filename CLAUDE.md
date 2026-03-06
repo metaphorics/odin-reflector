@@ -5,7 +5,7 @@ Claude Code plugin that routes hook events to OpenAI Codex CLI for independent s
 ## Commands
 
 ```bash
-# Self-test (verdict parser + plan path extraction + dedup hash, 31 cases)
+# Self-test (verdict parser + plan path extraction + dedup hash + synthetic path guards, 34 cases)
 python3 scripts/codex-reflector.py --test-parse
 
 # Lint
@@ -26,36 +26,8 @@ Single-file plugin: `scripts/codex-reflector.py` (~1525 LOC, ~1203 code).
 ### Data flow
 
 ```
-stdin JSON → main() dispatch by event
-  → classify() routes tool_name to category (code_change | plan_review | thinking | bash_failure)
-  → _check_dedup() skips Codex if identical content was reviewed recently (code_change only)
-  → _gate_model_effort() adjusts model/effort heuristically
-  → build_*_prompt() constructs review prompt (includes tool_response context)
-  → invoke_codex() calls `codex exec --sandbox read-only` (100s timeout, fail-open)
-  → _record_dedup() caches verdict hash for dedup (code_change only)
-  → parse_verdict() extracts PASS/FAIL/UNCERTAIN via regex
-  → respond_*() builds output dict with dual-channel output (systemMessage + additionalContext)
-  → main() routes: exit 0 (JSON stdout) or exit 2 (blocking, stderr text)
+stdin JSON → classify() → _check_dedup() → _gate_model_effort() → build_*_prompt() → invoke_codex() → parse_verdict() → respond_*() → exit 0/2
 ```
-
-### Source sections (in order)
-
-1. **Configuration** — constants (`MAX_COMPACT_CHARS`, `DEFAULT_MODEL`, `FAST_MODEL`), debug helper
-2. **Security** — `_redact()` strips secrets, `_sandbox_content()` wraps untrusted data in XML tags
-3. **Truncation** — `_smart_truncate()`: HEAD (40%) + FAST_MODEL summary + TAIL (40%) when content exceeds `MAX_COMPACT_CHARS` (400K chars)
-4. **Verdict parser** — `parse_verdict()`: regex-based PASS/FAIL/UNCERTAIN extraction from first 5 lines
-5. **Heuristics** — `_file_heuristics()` (security/test/data/UI/config detection), `_change_size_heuristics()` (expansion/reduction warnings)
-6. **Classification** — `classify()` routing tables (`_TOOL_ROUTES`, `_SKIP_TOOLS`, `_MCP_EDIT_MARKERS`, `_MCP_THINKING_MARKERS`), category defaults
-7. **Gating** — `_gate_model_effort()` upgrades/downgrades model+effort based on file size and content
-8. **Plan discovery** — `_validate_plan_path()`, `_extract_plan_path()`, `_find_plan_for_session()`, `_find_latest_plan_global()` — confined to `~/.claude/plans/*.md`
-9. **Codex invocation** — `invoke_codex()`: subprocess `codex exec --sandbox read-only`, tempfile output, fail-open
-10. **Prompt builders** — `build_code_review_prompt()`, `build_thinking_prompt()`, `build_bash_failure_prompt()`, `build_plan_review_prompt()`, `build_subagent_review_prompt()`, `build_stop_review_prompt()`, `build_precompact_prompt()` (metacognition layer — reflections on reasoning quality, bad habits, decision quality, workflow efficiency, and practices to continue)
-11. **State** — `_state_path()`, `_atomic_update_state()` (fcntl.flock), `_read_state()`, `write_fail_state()`, `clear_fail_state()`, `format_fails()`
-12. **Dedup cache** — `_review_hash()`, `_check_dedup()`, `_record_dedup()`: SHA-256 content hashing with TTL-based session-scoped cache to avoid re-reviewing identical edits
-13. **Output compaction** — `_compact_output()`: re-summarizes verbose output (>1500 chars) into <=5 bullets via FAST_MODEL
-14. **Response builders** — `respond_code_review()`, `respond_thinking()`, `respond_bash_failure()`, `respond_plan_review()`, `respond_subagent_review()`, `respond_stop()`, `respond_precompact()`
-15. **Self-test** — `run_self_test()`: 13 verdict parser + 12 plan path extraction + 6 dedup hash cases
-16. **Main** — `main()`: arg parsing, kill switch, stdin JSON, event routing, dedup, exit code dispatch
 
 ## Key patterns
 
@@ -98,7 +70,7 @@ Before invoking Codex for code reviews, a SHA-256 hash of `(tool_name, file_path
 ### Security
 
 - `_redact()` strips API keys, tokens, private keys, AWS credentials before sending to Codex
-- `_sandbox_content()` wraps untrusted data in `<untrusted-content>` XML tags with ignore-instructions directive
+- `_sandbox_content()` wraps untrusted data in `<untrusted-data>` XML tags with ignore-instructions directive
 - Plan path validation: confined to `~/.claude/plans/*.md`, rejects traversal attempts
 
 ### Truncation and compaction
@@ -123,6 +95,10 @@ Cross-cutting rules where breaking the coupling silently corrupts state.
 
 `_check_dedup()` cache hits must update fail-state so Stop sees correct state. PASS hits call `clear_fail_state()` then `sys.exit(0)`. FAIL/UNCERTAIN hits call `write_fail_state()` then re-surface a cached message. Note: this is intentionally more aggressive than `respond_code_review()`, where UNCERTAIN is a no-op. The dedup path writes state for cached UNCERTAIN to ensure Stop sees it even when Codex is not re-invoked.
 
+The dedup hash key field ordering (`tool_name|file_path|content|old|new` in `_review_hash()`) is a frozen contract — changing order silently breaks cache matching with no test coverage for ordering.
+
+`write_fail_state()` evicts per `file_path` — only the most recent FAIL per file is retained. Multiple concurrent FAILs on the same file collapse to the latest.
+
 ### Asymmetric fail semantics
 
 PostToolUse is fail-open: UNCERTAIN → exit 0, non-blocking feedback. Stop is fail-closed: UNCERTAIN → exit 2, blocking. Rationale: individual reviews are advisory; only the Stop accumulation checkpoint blocks.
@@ -130,6 +106,8 @@ PostToolUse is fail-open: UNCERTAIN → exit 0, non-blocking feedback. Stop is f
 ### Verdict-before-compact ordering
 
 `parse_verdict()` must run BEFORE `_compact_output()` in every `respond_*()` function. Compaction rewrites text via Codex summarization and can strip or reformat verdict lines.
+
+`_record_dedup()` in `main()` re-parses the verdict independently from `respond_code_review()`. Both parsings must agree — if respond changes its verdict logic, the dedup recording diverges silently.
 
 ### PASS dedup early exit
 
@@ -149,6 +127,7 @@ In `respond_code_review()`, `respond_plan_review()`, and `respond_subagent_revie
 - **Stop loop prevention**: `stop_hook_active` flag check at entry. Commented-out SubagentStop block needs same guard if re-enabled.
 - **`_exit` key discipline**: blocking requires `_exit: 2` or `decision: "block"`. Omitting both → silent exit 0 (approves).
 - **hookSpecificOutput event scope**: Only `PostToolUse`, `PostToolUseFailure`, `PreToolUse`, and `UserPromptSubmit` support `hookSpecificOutput` in their JSON output schema. Stop, SubagentStop, PreCompact, and other events reject it with a validation error. Use `systemMessage` for user-visible feedback on those events, and `decision`/`reason` for blocking.
+- **Synthetic plan paths**: Use `synthetic::` prefix (readability only — any string is a valid POSIX filename). Security boundary is `_is_synthetic_path()` runtime checks at I/O boundaries, not the prefix itself. Used as state keys only, never for filesystem I/O.
 
 ## Fail-open / fail-closed map
 
@@ -163,35 +142,3 @@ In `respond_code_review()`, `respond_plan_review()`, and `respond_subagent_revie
 | `_validate_plan_path()` invalid | silent rejection of that candidate (fallback continues) | Security boundary |
 | stdin JSON parse error | `sys.exit(0)` | Never block on malformed input |
 
-## Hooks reference (project-relevant subset)
-
-### Exit codes (hook → Claude Code)
-
-| Exit | Effect |
-|:-----|:-------|
-| 0 | Success — stdout JSON processed |
-| 2 | Blocking error — stderr fed to Claude |
-| Other | Non-blocking error — continues |
-
-### Decision control (events this plugin uses)
-
-| Events | Pattern | Key fields |
-|:-------|:--------|:-----------|
-| PostToolUse, Stop | Top-level `decision` | `decision: "block"`, `reason` |
-| PostToolUse, PostToolUseFailure | `hookSpecificOutput` | `hookEventName`, `additionalContext` |
-
-### Event input fields
-
-| Event | Fields consumed |
-|:------|:----------------|
-| PostToolUse | `tool_name`, `tool_input`, `tool_response`, `tool_use_id` |
-| PostToolUseFailure | `tool_name`, `tool_input`, `tool_response`, `error` |
-| Stop | `stop_hook_active`, `transcript_path`, `last_assistant_message` |
-| PreCompact | `transcript_path` |
-| All events | `session_id`, `cwd`, `hook_event_name` |
-
-### JSON output fields (used by this plugin)
-
-- `decision: "block"` + `reason` — blocks Claude, continues with reason (Stop event)
-- `systemMessage` — warning shown to user (all events)
-- `hookSpecificOutput.additionalContext` — injected into Claude context (PostToolUse, PostToolUseFailure, Stop)
