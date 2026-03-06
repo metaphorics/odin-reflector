@@ -35,7 +35,7 @@ MAX_COMPACT_CHARS = (
     400_000  # ~100K tokens at ~4 chars/token — trigger compaction above this
 )
 STATE_DIR = Path("/tmp")
-DEFAULT_MODEL = "gpt-5.3-codex"  # 400k context window
+DEFAULT_MODEL = "gpt-5.4"  # 1M context window
 LIGHTNING_FAST_MODEL = "gpt-5.3-codex-spark"  # 128k context window
 FAST_MODEL = "gpt-5.1-codex-mini"  # 400k context window
 
