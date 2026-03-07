@@ -12,7 +12,7 @@ Claude Code acts. Codex reviews. Every code change gets a second opinion. Every 
 ## Install
 
 ```bash
-claude plugin marketplace add metaphorics/odin-reflector; claude plugin install codex-reflector@odin-reflector
+claude plugin marketplace add OutlineDriven/odin-reflector; claude plugin install codex-reflector@odin-reflector
 ```
 
 ## Hook Events
