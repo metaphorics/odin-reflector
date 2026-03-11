@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py",
             "timeout": 240
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py",
             "timeout": 120
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py",
             "timeout": 240
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py\"",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/codex-reflector.py",
             "timeout": 240
           }
         ]
