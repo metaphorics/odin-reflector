@@ -47,19 +47,15 @@ FAST_MODEL = "gpt-5.4-mini"  # 1M context window
 ModelEffort = namedtuple("ModelEffort", ["model", "effort"])
 
 _ME_CODE_REVIEW = ModelEffort(FAST_MODEL, "medium")  # base: simple changes → mini
-_ME_CODE_REVIEW_HARD = ModelEffort(
-    DEFAULT_MODEL, "medium"
-)  # risk signals → full model
-_ME_CODE_REVIEW_COMPLEX = ModelEffort(
-    DEFAULT_MODEL, "high"
-)  # multiple signals → full+high
-_ME_CODE_REVIEW_TINY = ModelEffort(FAST_MODEL, "medium")  # trivial → mini+low
-_ME_PLAN_REVIEW = ModelEffort(DEFAULT_MODEL, "xhigh")  # always full
+_ME_CODE_REVIEW_HARD = ModelEffort(FAST_MODEL, "high")  # risk signals → full model
+_ME_CODE_REVIEW_COMPLEX = ModelEffort(DEFAULT_MODEL, "medium")
+_ME_CODE_REVIEW_TINY = ModelEffort(FAST_MODEL, "low")  # trivial → mini+low
+_ME_PLAN_REVIEW = ModelEffort(DEFAULT_MODEL, "high")  # always full
 _ME_THINKING = ModelEffort(FAST_MODEL, "xhigh")  # thinking → mini
 _ME_BASH_FAILURE = ModelEffort(FAST_MODEL, "low")
 _ME_STOP_REVIEW = ModelEffort(DEFAULT_MODEL, "medium")  # always full (safety)
-_ME_PRECOMPACT = ModelEffort(FAST_MODEL, "high")  # compaction → mini
-_ME_SUMMARIZE = ModelEffort(FAST_MODEL, "medium")  # _compact_output + _matryoshka_compact
+_ME_PRECOMPACT = ModelEffort(FAST_MODEL, "xhigh")  # compaction → mini
+_ME_SUMMARIZE = ModelEffort(FAST_MODEL, "medium")
 _ME_SUBAGENT_REVIEW = ModelEffort(FAST_MODEL, "medium")  # always full model
 
 # Compact output directives — verdict vs non-verdict prompts.
@@ -1017,7 +1013,6 @@ _VERDICT_PREFIX: dict[str, str] = {
     "PASS": "\u2713 PASS",
     "UNCERTAIN": "? UNCERTAIN",
 }
-
 
 
 # ---------------------------------------------------------------------------
