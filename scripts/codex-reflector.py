@@ -53,10 +53,10 @@ _ME_CODE_REVIEW_TINY = ModelEffort(FAST_MODEL, "medium")  # trivial → mini+low
 _ME_PLAN_REVIEW = ModelEffort(DEFAULT_MODEL, "medium")
 _ME_THINKING = ModelEffort(FAST_MODEL, "xhigh")  # thinking → mini
 _ME_BASH_FAILURE = ModelEffort(FAST_MODEL, "low")
-_ME_STOP_REVIEW = ModelEffort(DEFAULT_MODEL, "medium")  # always full (safety)
-_ME_PRECOMPACT = ModelEffort(FAST_MODEL, "xhigh")  # compaction → mini
+_ME_STOP_REVIEW = ModelEffort(FAST_MODEL, "xhigh")  # always full (safety)
+_ME_PRECOMPACT = ModelEffort(FAST_MODEL, "high")  # compaction → mini
 _ME_SUMMARIZE = ModelEffort(FAST_MODEL, "medium")
-_ME_SUBAGENT_REVIEW = ModelEffort(FAST_MODEL, "medium")  # always full model
+_ME_SUBAGENT_REVIEW = ModelEffort(FAST_MODEL, "medium")
 
 # Compact output directives — verdict vs non-verdict prompts.
 _COMPACT_VERDICT = """
