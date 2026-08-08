@@ -264,12 +264,15 @@ describe("codexExecArgs", () => {
 		}
 	});
 
-	// Live smoke: xhigh complex review must stay within HANDLER_BUDGET_MS (25s)
-	// vs Python's ~100s guard. Measured 2026-08-09: xhigh with 5.5k payload
-	// took ~18.3s (small prompt ~6.4s), both <25s. This test re-proves that
-	// live when CODEX_SMOKE=1 is set; otherwise it documents the measurement
-	// without paying the 6-18s cost on every `bun test` run.
-	test("xhigh complex review stays within handler budget (live, opt-in)", () => {
+	// Live smoke: direct Codex invocation latency for xhigh must stay within
+	// HANDLER_BUDGET_MS (25s) vs Python's ~100s guard. Measured 2026-08-09:
+	// xhigh with 5.5k payload took ~18.3s (small prompt ~6.4s), both <25s.
+	// This test re-proves direct invocation latency when CODEX_SMOKE=1 is
+	// set; otherwise it documents the measurement without paying the 6-18s
+	// cost on every `bun test` run. It does NOT exercise handlerDeadline,
+	// snippet compaction, prompt construction, invokeCodex, or handler
+	// cleanup — see the handler integration smoke below for the full path.
+	test("xhigh direct Codex invocation latency stays within handler budget (live, opt-in)", () => {
 		if (process.env.CODEX_SMOKE !== "1") return; // opt-in: `CODEX_SMOKE=1 bun test ...`
 		const outPath = `/tmp/codex-smoke-xhigh-${Date.now()}.txt`;
 		const largePayload = "const x=1;\n".repeat(500); // ~5.5k, same as complex gate
@@ -1152,6 +1155,33 @@ exit 0
 			rmSync(binDir, { recursive: true, force: true });
 		}
 	}, 15_000);
+	test("xhigh handler integration through tool_result settles within budget (live, opt-in)", async () => {
+		if (process.env.CODEX_SMOKE !== "1") return; // opt-in: `CODEX_SMOKE=1 bun test ...`
+		const { pi, handlers } = makePi();
+		codexReflector(pi);
+		const handler = handlers.get("tool_result");
+		expect(handler).toBeDefined();
+		if (!handler) return;
+		const largePayload = "const x=1;\n".repeat(500); // ~5.5k triggers CODE_REVIEW_COMPLEX=xhigh
+		const event: Record<string, unknown> = {
+			type: "tool_result",
+			toolName: "write",
+			toolCallId: "id",
+			input: { path: "src/complex.ts", content: largePayload },
+			content: [],
+			isError: false,
+		};
+		const ctx: Record<string, unknown> = { cwd: ".", hasUI: false, ui: { notify() {} } };
+		const start = Date.now();
+		const result = await (handler as (e: unknown, c: unknown) => Promise<unknown>)(event, ctx);
+		const elapsed = Date.now() - start;
+		// handler is fail-open: unavailable codex or rate-limit returns undefined
+		if (result === undefined) {
+			console.warn("handler smoke skipped: codex unavailable or fail-open");
+			return;
+		}
+		expect(elapsed).toBeLessThan(HANDLER_BUDGET_MS);
+	}, 65_000);
 	test("tool_result fails open when codex hangs (deadline SIGKILLs the child)", async () => {
 		const binDir = mkdtempSync(join(tmpdir(), "codex-ref-fakebin-"));
 		const fake = join(binDir, "codex");
