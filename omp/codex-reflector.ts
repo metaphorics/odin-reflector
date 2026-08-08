@@ -55,11 +55,13 @@ const FAST_MODEL = "gpt-5.6-luna"; // fast/affordable: summaries, mid-gate, tiny
 
 const MAX_COMPACT_CHARS = 400_000; // ~100K tokens — trigger matryoshka above this
 const COMPACT_THRESHOLD = 1500; // chars — re-summarize verbose codex output above this
-const CODEX_TIMEOUT_MS = 25_000;
-// Per-handler budget shared across all codex calls in one handler invocation.
-// Must stay under oh-my-pi's fixed EXTENSION_HANDLER_TIMEOUT_MS (30_000ms): the
-// harness kills a handler at 30s without aborting it, orphaning the codex child.
-export const HANDLER_BUDGET_MS = 25_000;
+// Timeout hierarchy (all < EXTENSION_HANDLER_TIMEOUT_MS=30_000):
+// codex child 26s < handler budget 28s < harness 30s. 2s handler->harness margin
+// for cleanup; 2s codex->handler margin for prompt/compaction. Measured xhigh
+// via handler ~19-25s, so 25s codex was too tight (killed at budget, hid as
+// undefined). 26s codex + 28s handler gives headroom while staying 2s under harness.
+const CODEX_TIMEOUT_MS = 26_000;
+export const HANDLER_BUDGET_MS = 28_000;
 let handlerBudgetMs = HANDLER_BUDGET_MS;
 /** Test-only: shrink the per-handler budget so the deadline can be exercised
  *  without a 25s wait. Restore with testSetHandlerBudgetMs(HANDLER_BUDGET_MS). */
