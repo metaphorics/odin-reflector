@@ -1,7 +1,7 @@
 
 {
   "name": "codex-reflector-omp",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "type": "module",
   "description": "Native oh-my-pi (Pi) hook: routes tool/agent events to OpenAI Codex CLI for independent second-model review, bash diagnostics, thinking reflection, and pre-compaction metacognition.",
   "scripts": {

@@ -251,9 +251,14 @@ describe("codexExecArgs", () => {
 		// The suite stubs `codex` with a fake that ignores argv, so an argv the
 		// real CLI rejects passes every other test here while failing open in
 		// production. `codex exec --help` is local and needs no auth, so ask the
-		// real parser what it accepts. Skips when codex is not installed.
+		// real parser what it accepts. Skips only when codex is not installed
+		// (ENOENT); any other spawn error or non-zero exit is a real failure.
 		const help = spawnSync("codex", ["exec", "--help"], { encoding: "utf8" });
-		if (help.error || help.status !== 0) return; // codex unavailable — nothing to check
+		if (help.error) {
+			if ((help.error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw help.error;
+		}
+		expect(help.status).toBe(0);
 		for (const flag of args.filter((a) => a.startsWith("--"))) {
 			expect(help.stdout).toContain(flag);
 		}
