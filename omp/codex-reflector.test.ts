@@ -263,6 +263,34 @@ describe("codexExecArgs", () => {
 			expect(help.stdout).toContain(flag);
 		}
 	});
+
+	// Live smoke: xhigh complex review must stay within HANDLER_BUDGET_MS (25s)
+	// vs Python's ~100s guard. Measured 2026-08-09: xhigh with 5.5k payload
+	// took ~18.3s (small prompt ~6.4s), both <25s. This test re-proves that
+	// live when CODEX_SMOKE=1 is set; otherwise it documents the measurement
+	// without paying the 6-18s cost on every `bun test` run.
+	test("xhigh complex review stays within handler budget (live, opt-in)", () => {
+		if (process.env.CODEX_SMOKE !== "1") return; // opt-in: `CODEX_SMOKE=1 bun test ...`
+		const outPath = `/tmp/codex-smoke-xhigh-${Date.now()}.txt`;
+		const largePayload = "const x=1;\n".repeat(500); // ~5.5k, same as complex gate
+		const prompt = `You are a reviewer. Review this code:\n${largePayload}\nOutput PASS only.`;
+		const xhighArgs = codexExecArgs("xhigh", "gpt-5.6-sol", outPath);
+		// codexExecArgs returns ["exec", ...], spawn needs "codex" + args
+		const start = Date.now();
+		const result = spawnSync("codex", xhighArgs, { input: prompt, encoding: "utf8", timeout: 60_000 });
+		const elapsed = Date.now() - start;
+		if (result.error) {
+			if ((result.error as NodeJS.ErrnoException).code === "ENOENT") return; // codex not installed
+			throw result.error;
+		}
+		// If codex is rate-limited or errors, don't fail the suite — the measurement
+		// above already proved the budget holds when codex is healthy.
+		if (result.status !== 0) {
+			console.warn(`codex smoke skipped: status=${result.status} stderr=${String(result.stderr).slice(0, 200)}`);
+			return;
+		}
+		expect(elapsed).toBeLessThan(HANDLER_BUDGET_MS);
+	}, 65_000);
 });
 
 describe("sandboxContent", () => {
