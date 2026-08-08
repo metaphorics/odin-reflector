@@ -84,8 +84,8 @@ export interface Routed {
 
 // Model/effort presets — every (model, effort) pair lives here.
 const CODE_REVIEW: Preset = { model: DEFAULT_MODEL, effort: "medium" };
-const CODE_REVIEW_HARD: Preset = { model: FRONTIER_MODEL, effort: "medium" };
-const CODE_REVIEW_COMPLEX: Preset = { model: FRONTIER_MODEL, effort: "high" };
+const CODE_REVIEW_HARD: Preset = { model: FRONTIER_MODEL, effort: "high" };
+const CODE_REVIEW_COMPLEX: Preset = { model: FRONTIER_MODEL, effort: "xhigh" };
 const CODE_REVIEW_TINY: Preset = { model: FAST_MODEL, effort: "medium" };
 const THINKING: Preset = { model: DEFAULT_MODEL, effort: "high" };
 const BASH_FAILURE: Preset = { model: DEFAULT_MODEL, effort: "low" };

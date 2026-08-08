@@ -184,23 +184,23 @@ describe("gateModelEffort", () => {
 			effort: "medium",
 		});
 	});
-	test("security-sensitive path -> hard (medium)", () => {
+	test("security-sensitive path -> hard (high)", () => {
 		expect(gateModelEffort("code_change", ".env.local", "X".repeat(300))).toEqual({
 			model: "gpt-5.6-sol",
-			effort: "medium",
+			effort: "high",
 		});
 	});
-	test("large snippet -> hard (medium)", () => {
+	test("large snippet -> hard (high)", () => {
 		expect(gateModelEffort("code_change", "src/util.ts", "X".repeat(6000))).toEqual({
 			model: "gpt-5.6-sol",
-			effort: "medium",
+			effort: "high",
 		});
 	});
-	test("multiple risk signals -> complex (high)", () => {
+	test("multiple risk signals -> complex (xhigh)", () => {
 		// security-sensitive path (1 file hint) + >5000 chars (1 change hint) -> complex
 		expect(gateModelEffort("code_change", ".env.local", "X".repeat(6000))).toEqual({
 			model: "gpt-5.6-sol",
-			effort: "high",
+			effort: "xhigh",
 		});
 	});
 	test("non code_change category -> base preset", () => {
