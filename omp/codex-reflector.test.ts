@@ -265,8 +265,8 @@ describe("codexExecArgs", () => {
 	});
 
 	// Live smoke: direct Codex invocation latency for xhigh must stay within
-	// HANDLER_BUDGET_MS (25s) vs Python's ~100s guard. Measured 2026-08-09:
-	// xhigh with 5.5k payload took ~18.3s (small prompt ~6.4s), both <25s.
+	// codex timeout 26s / handler budget 28s vs Python's ~100s guard. Measured 2026-08-09:
+	// xhigh with 5.5k payload took ~18.3s direct (small prompt ~6.4s), handler ~19.7s, all <28s.
 	// This test re-proves direct invocation latency when CODEX_SMOKE=1 is
 	// set; otherwise it documents the measurement without paying the 6-18s
 	// cost on every `bun test` run. It does NOT exercise handlerDeadline,
@@ -1162,12 +1162,12 @@ exit 0
 		const handler = handlers.get("tool_result");
 		expect(handler).toBeDefined();
 		if (!handler) return;
-		const largePayload = "const x=1;\n".repeat(500); // ~5.5k triggers CODE_REVIEW_COMPLEX=xhigh
+		const largePayload = "const x=1;\n"; // small payload but path triggers xhigh via two fileHints
 		const event: Record<string, unknown> = {
 			type: "tool_result",
 			toolName: "write",
 			toolCallId: "id",
-			input: { path: "src/complex.ts", content: largePayload },
+			input: { path: "src/auth/credentials.test.ts", content: largePayload },
 			content: [],
 			isError: false,
 		};
@@ -1175,12 +1175,15 @@ exit 0
 		const start = Date.now();
 		const result = await (handler as (e: unknown, c: unknown) => Promise<unknown>)(event, ctx);
 		const elapsed = Date.now() - start;
-		// handler is fail-open: unavailable codex or rate-limit returns undefined
-		if (result === undefined) {
-			console.warn("handler smoke skipped: codex unavailable or fail-open");
-			return;
-		}
 		expect(elapsed).toBeLessThan(HANDLER_BUDGET_MS);
+		if (result === undefined) {
+			// Fail on deadline/budget expiry (elapsed near codex/handler budget), only skip on fast unavailability
+			if (elapsed < 5_000) {
+				console.warn(`handler smoke skipped: codex unavailable or fail-open (elapsed ${elapsed}ms)`);
+				return;
+			}
+			throw new Error(`handler integration failed: returned undefined after ${elapsed}ms (budget ${HANDLER_BUDGET_MS}ms) — deadline or codex error, not unavailability`);
+		}
 	}, 65_000);
 	test("tool_result fails open when codex hangs (deadline SIGKILLs the child)", async () => {
 		const binDir = mkdtempSync(join(tmpdir(), "codex-ref-fakebin-"));
