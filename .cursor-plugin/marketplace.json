@@ -1,6 +1,6 @@
 {
   "name": "odin-reflector",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "Marketplace metadata for the codex-reflector plugin",
   "owner": {
     "name": "cognitive-glitch",
@@ -14,7 +14,7 @@
     {
       "name": "codex-reflector",
       "source": "./",
-      "version": "1.2.5",
+      "version": "1.2.6",
       "description": "Codex CLI reflector for independent second-model review in Claude Code and Cursor",
       "author": {
         "name": "cognitive-glitch"

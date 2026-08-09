@@ -55,11 +55,13 @@ const FAST_MODEL = "gpt-5.6-luna"; // fast/affordable: summaries, mid-gate, tiny
 
 const MAX_COMPACT_CHARS = 400_000; // ~100K tokens — trigger matryoshka above this
 const COMPACT_THRESHOLD = 1500; // chars — re-summarize verbose codex output above this
-const CODEX_TIMEOUT_MS = 25_000;
-// Per-handler budget shared across all codex calls in one handler invocation.
-// Must stay under oh-my-pi's fixed EXTENSION_HANDLER_TIMEOUT_MS (30_000ms): the
-// harness kills a handler at 30s without aborting it, orphaning the codex child.
-export const HANDLER_BUDGET_MS = 25_000;
+// Timeout hierarchy (all < EXTENSION_HANDLER_TIMEOUT_MS=30_000):
+// codex child 26s < handler budget 28s < harness 30s. This leaves 2s for
+// cleanup at each boundary. OMP does not route xhigh reviews: a live 5.5K
+// call took 37.588s, and a handler hit this child timeout at 26.020s.
+// The same handler completed at frontier@high in 11.025s.
+export const CODEX_TIMEOUT_MS = 26_000;
+export const HANDLER_BUDGET_MS = 28_000;
 let handlerBudgetMs = HANDLER_BUDGET_MS;
 /** Test-only: shrink the per-handler budget so the deadline can be exercised
  *  without a 25s wait. Restore with testSetHandlerBudgetMs(HANDLER_BUDGET_MS). */
@@ -83,16 +85,35 @@ export interface Routed {
 }
 
 // Model/effort presets — every (model, effort) pair lives here.
-const CODE_REVIEW: Preset = { model: FAST_MODEL, effort: "high" };
-const CODE_REVIEW_HARD: Preset = { model: DEFAULT_MODEL, effort: "medium" };
-const CODE_REVIEW_COMPLEX: Preset = { model: DEFAULT_MODEL, effort: "high" };
+const CODE_REVIEW: Preset = { model: DEFAULT_MODEL, effort: "medium" };
+const CODE_REVIEW_HARD: Preset = { model: FRONTIER_MODEL, effort: "high" };
+// The OMP host caps handlers at 30s. Python keeps xhigh under its ~100s guard.
+const CODE_REVIEW_COMPLEX: Preset = { model: FRONTIER_MODEL, effort: "high" };
 const CODE_REVIEW_TINY: Preset = { model: FAST_MODEL, effort: "medium" };
 const THINKING: Preset = { model: DEFAULT_MODEL, effort: "high" };
-const BASH_FAILURE: Preset = { model: FAST_MODEL, effort: "high" };
-const BASH_GUARD: Preset = { model: FAST_MODEL, effort: "medium" }; // pre-execution gate: luna@medium
-const STOP_REVIEW: Preset = { model: DEFAULT_MODEL, effort: "medium" };
-const PRECOMPACT: Preset = { model: DEFAULT_MODEL, effort: "low" };
+const BASH_FAILURE: Preset = { model: DEFAULT_MODEL, effort: "low" };
+const BASH_GUARD: Preset = { model: FAST_MODEL, effort: "low" }; // pre-execution gate: luna@low
+const STOP_REVIEW: Preset = { model: FRONTIER_MODEL, effort: "medium" };
+const PRECOMPACT: Preset = { model: FRONTIER_MODEL, effort: "low" };
 const SUMMARIZE: Preset = { model: FAST_MODEL, effort: "high" };
+
+/** Every model slug reachable through a preset, derived from the presets above.
+ *  AGENTS.md forbids collapsing the three reviewer roles onto one model; a
+ *  per-preset test only catches that one preset at a time, so this array is
+ *  asserted as a three-way partition. It is derived, not restated: retiering a
+ *  preset moves its entry here automatically. */
+export const ROUTED_MODELS: readonly string[] = [
+	CODE_REVIEW.model,
+	CODE_REVIEW_HARD.model,
+	CODE_REVIEW_COMPLEX.model,
+	CODE_REVIEW_TINY.model,
+	THINKING.model,
+	BASH_FAILURE.model,
+	BASH_GUARD.model,
+	STOP_REVIEW.model,
+	PRECOMPACT.model,
+	SUMMARIZE.model,
+];
 
 // Compact output directives — verdict vs non-verdict prompts.
 const COMPACT_VERDICT =
@@ -445,6 +466,29 @@ export function gateModelEffort(category: Category, filePath: string, snippet: s
 // Codex invocation + matryoshka compaction
 // ---------------------------------------------------------------------------
 
+/** The `codex exec` argv. Exported so a test can check every long flag against
+ *  the installed `codex exec --help`: the suite stubs `codex` with a fake that
+ *  ignores argv, so a flag the real CLI rejects would otherwise pass every test
+ *  while failing open in production — which is how `--full-auto` survived here.
+ *  `--sandbox read-only` is the read-only guarantee; keep it identical to the
+ *  Python surface's flag set. */
+export function codexExecArgs(effort: Effort, model: string, outPath: string): string[] {
+	return [
+		"exec",
+		"--sandbox",
+		"read-only",
+		"--skip-git-repo-check",
+		"--ephemeral",
+		"-c",
+		`model_reasoning_effort=${effort}`,
+		"-m",
+		model,
+		"-o",
+		outPath,
+		"-", // read prompt from stdin
+	];
+}
+
 /** Call `codex exec` in a read-only sandbox; fail-open to "" on any error. */
 async function invokeCodex(
 	prompt: string,
@@ -459,21 +503,7 @@ async function invokeCodex(
 	const outPath = join(tmpdir(), `codex-ref-${randomUUID()}.txt`);
 	try {
 		const ok = await new Promise<boolean>((resolve) => {
-			const args = [
-				"exec",
-				"--sandbox",
-				"read-only",
-				"--skip-git-repo-check",
-				"--full-auto",
-				"--ephemeral",
-				"-c",
-				`model_reasoning_effort=${effort}`,
-				"-m",
-				m,
-				"-o",
-				outPath,
-				"-", // read prompt from stdin
-			];
+			const args = codexExecArgs(effort, m, outPath);
 			debug(`invoking codex (effort=${effort}, model=${m})`);
 			const child = spawn("codex", args, {
 				cwd: cwd || undefined,

@@ -613,7 +613,6 @@ def invoke_codex(prompt: str, cwd: str, effort: str = "medium", model: str = "")
             "--sandbox",
             "read-only",
             "--skip-git-repo-check",
-            "--full-auto",
             "--ephemeral",
             "-c",
             f"model_reasoning_effort={effort}",

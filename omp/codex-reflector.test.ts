@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,8 @@ import codexReflector, {
 	changeSizeHeuristics,
 	classify,
 	codeReviewResponse,
+	codexExecArgs,
+	CODEX_TIMEOUT_MS,
 	fileHeuristics,
 	gateModelEffort,
 	handlerDeadline,
@@ -22,6 +25,7 @@ import codexReflector, {
 	renderTranscript,
 	resolveChangeTarget,
 	resolveDeviceWrite,
+	ROUTED_MODELS,
 	sandboxContent,
 	stopReviewDecision,
 	testSetHandlerBudgetMs,
@@ -68,13 +72,13 @@ describe("parseVerdict", () => {
 
 describe("classify", () => {
 	test("native mutators -> code_change", () => {
-		expect(classify("write", false)?.category).toBe("code_change");
-		expect(classify("edit", false)?.category).toBe("code_change");
-		expect(classify("ast_edit", false)?.category).toBe("code_change");
-		expect(classify("fast_edit", false)?.category).toBe("code_change");
+		expect(classify("write", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
+		expect(classify("edit", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
+		expect(classify("ast_edit", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
+		expect(classify("fast_edit", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
 	});
 	test("bash failure -> bash_failure, bash success -> null", () => {
-		expect(classify("bash", true)?.category).toBe("bash_failure");
+		expect(classify("bash", true)).toEqual({ category: "bash_failure", model: "gpt-5.6-terra", effort: "low" });
 		expect(classify("bash", false)).toBeNull();
 	});
 	test("non-reviewed tools -> null", () => {
@@ -83,12 +87,12 @@ describe("classify", () => {
 		expect(classify("search", false)).toBeNull();
 	});
 	test("thinking MCP -> thinking", () => {
-		expect(classify("mcp__sequential__sequentialthinking", false)?.category).toBe("thinking");
-		expect(classify("mcp__shannon__shannon", false)?.category).toBe("thinking");
+		expect(classify("mcp__sequential__sequentialthinking", false)).toEqual({ category: "thinking", model: "gpt-5.6-terra", effort: "high" });
+		expect(classify("mcp__shannon__shannon", false)).toEqual({ category: "thinking", model: "gpt-5.6-terra", effort: "high" });
 	});
 	test("Fast-Apply MCP success -> code_change", () => {
-		expect(classify("mcp__morph__edit_file", false)?.category).toBe("code_change");
-		expect(classify("mcp__morphllm__edit_file", false)?.category).toBe("code_change");
+		expect(classify("mcp__morph__edit_file", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
+		expect(classify("mcp__morphllm__edit_file", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
 	});
 	test("non-edit Morph MCP tools -> null (fastcompact is not an edit)", () => {
 		expect(classify("mcp__morph__fastcompact", false)).toBeNull();
@@ -103,13 +107,13 @@ describe("classify", () => {
 	});
 	test("Fast-Apply MCP failure WITH Morph payload -> code_change_failure", () => {
 		expect(
-			classify("mcp__morph__edit_file", true, { code_edit: "x", instruction: "y" })?.category,
-		).toBe("code_change_failure");
+			classify("mcp__morph__edit_file", true, { code_edit: "x", instruction: "y" }),
+		).toEqual({ category: "code_change_failure", model: "gpt-5.6-terra", effort: "low" });
 	});
 	test("native fast_edit failure WITH Morph payload -> code_change_failure", () => {
 		expect(
-			classify("fast_edit", true, { code_edit: "x", instructions: "y" })?.category,
-		).toBe("code_change_failure");
+			classify("fast_edit", true, { code_edit: "x", instructions: "y" }),
+		).toEqual({ category: "code_change_failure", model: "gpt-5.6-terra", effort: "low" });
 	});
 	test("native fast_edit failure WITHOUT complete payload -> null", () => {
 		expect(classify("fast_edit", true)).toBeNull();
@@ -181,21 +185,27 @@ describe("gateModelEffort", () => {
 			effort: "medium",
 		});
 	});
-	test("security-sensitive path -> hard (medium)", () => {
+	test("security-sensitive path -> hard (high)", () => {
 		expect(gateModelEffort("code_change", ".env.local", "X".repeat(300))).toEqual({
 			model: "gpt-5.6-sol",
-			effort: "medium",
+			effort: "high",
 		});
 	});
-	test("large snippet -> hard (medium)", () => {
+	test("large snippet -> hard (high)", () => {
 		expect(gateModelEffort("code_change", "src/util.ts", "X".repeat(6000))).toEqual({
 			model: "gpt-5.6-sol",
-			effort: "medium",
+			effort: "high",
 		});
 	});
-	test("multiple risk signals -> complex (high)", () => {
+	test("file and change hints -> complex (frontier high within OMP budget)", () => {
 		// security-sensitive path (1 file hint) + >5000 chars (1 change hint) -> complex
 		expect(gateModelEffort("code_change", ".env.local", "X".repeat(6000))).toEqual({
+			model: "gpt-5.6-sol",
+			effort: "high",
+		});
+	});
+	test("multiple file hints -> complex (frontier high within OMP budget)", () => {
+		expect(gateModelEffort("code_change", "src/auth/credentials.test.ts", "const x=1;\n")).toEqual({
 			model: "gpt-5.6-sol",
 			effort: "high",
 		});
@@ -212,6 +222,79 @@ describe("gateModelEffort", () => {
 			effort: "high",
 		});
 	});
+});
+
+describe("ROUTED_MODELS", () => {
+	// AGENTS.md: "Keep three reviewer roles on both surfaces (DEFAULT_MODEL,
+	// FRONTIER_MODEL, FAST_MODEL) ... do not collapse roles onto one model."
+	// The per-preset tests above each pin one preset's exact slug, so they own
+	// role IDENTITY but cannot catch a sweep that retiers every preset and
+	// updates its own expectation in the same edit. This owns role CARDINALITY.
+	//
+	// Cardinality, not literal slugs: AGENTS.md expects the three role constants
+	// to be re-pinned when OpenAI renames the lineup, and a slug list would fail
+	// that legitimate edit. Asserting against the role constants instead would be
+	// worse — aliasing FRONTIER_MODEL to DEFAULT_MODEL is the collapse this guard
+	// exists to catch, and both sides would dedupe together and pass.
+	test("all three reviewer roles stay reachable through a preset", () => {
+		expect(new Set(ROUTED_MODELS).size).toBe(3);
+	});
+});
+
+describe("codexExecArgs", () => {
+	const args = codexExecArgs("medium", "gpt-5.6-sol", "/tmp/out.txt");
+
+	test("keeps the read-only sandbox guarantee", () => {
+		// AGENTS.md: "--sandbox read-only (not --full-auto) is the read-only
+		// guarantee", and --skip-git-repo-check "prevents a silent fail-open
+		// outside a git repo".
+		expect(args).toContain("--sandbox");
+		expect(args[args.indexOf("--sandbox") + 1]).toBe("read-only");
+		expect(args).toContain("--skip-git-repo-check");
+		expect(args).not.toContain("--full-auto");
+	});
+
+	test("every long flag is accepted by the installed codex exec", () => {
+		// The suite stubs `codex` with a fake that ignores argv, so an argv the
+		// real CLI rejects passes every other test here while failing open in
+		// production. `codex exec --help` is local and needs no auth, so ask the
+		// real parser what it accepts. Skips only when codex is not installed
+		// (ENOENT); any other spawn error or non-zero exit is a real failure.
+		const help = spawnSync("codex", ["exec", "--help"], { encoding: "utf8" });
+		if (help.error) {
+			if ((help.error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw help.error;
+		}
+		expect(help.status).toBe(0);
+		const accepted = new Set(help.stdout.match(/--[a-z][a-z0-9-]*/g) ?? []);
+		for (const flag of args.filter((a) => a.startsWith("--"))) {
+			expect(accepted.has(flag)).toBe(true);
+		}
+	});
+
+	test("frontier-high direct Codex invocation stays within child timeout (live, opt-in)", () => {
+		if (process.env.CODEX_SMOKE !== "1") return; // opt-in: `CODEX_SMOKE=1 bun test ...`
+		const outPath = join(tmpdir(), `codex-smoke-high-${Date.now()}.txt`);
+		try {
+			const payload = "const x=1;\n".repeat(500); // ~5.5K, same size that falsified xhigh
+			const prompt = `You are a reviewer. Review this code:\n${payload}\nOutput PASS only.`;
+			const args = codexExecArgs("high", "gpt-5.6-sol", outPath);
+			const start = Date.now();
+			const result = spawnSync("codex", args, { input: prompt, encoding: "utf8", timeout: 60_000 });
+			const elapsed = Date.now() - start;
+			if (result.error) {
+				if ((result.error as NodeJS.ErrnoException).code === "ENOENT") return; // codex not installed
+				throw result.error;
+			}
+			if (result.status !== 0) {
+				throw new Error(`codex smoke failed: status=${result.status} stderr=${String(result.stderr).slice(0, 200)}`);
+			}
+			expect(elapsed).toBeLessThan(CODEX_TIMEOUT_MS);
+		} finally {
+			rmSync(outPath, { force: true });
+		}
+	}, 65_000);
+
 });
 
 describe("sandboxContent", () => {
@@ -726,7 +809,7 @@ exit 0
 				type: "tool_result",
 				toolName: "write",
 				toolCallId: "id",
-				input: { path: "src/util.ts", content: "const x = 1;" },
+				input: { path: ".env.local", content: "API_KEY=sk-deadbeefcafebabe\n" },
 				content: [],
 				isError: false,
 			} as unknown as Parameters<NonNullable<typeof handler>>[0];
@@ -738,7 +821,7 @@ exit 0
 			const argsLines = readFileSync(argsLog, "utf8").trim().split("\n");
 			expect(argsLines).toHaveLength(1);
 			expect(argsLines[0]).toContain("-m gpt-5.3-codex-spark");
-			expect(argsLines[0]).toContain("model_reasoning_effort=medium");
+			expect(argsLines[0]).toContain("model_reasoning_effort=high");
 		} finally {
 			process.env.PATH = prevPath;
 			if (prevModel === undefined) delete process.env.CODEX_REFLECTOR_MODEL;
@@ -1073,6 +1156,59 @@ exit 0
 			rmSync(binDir, { recursive: true, force: true });
 		}
 	}, 15_000);
+	test("frontier-high complex handler settles within OMP budget (live, opt-in)", async () => {
+		if (process.env.CODEX_SMOKE !== "1") return; // opt-in: `CODEX_SMOKE=1 bun test ...`
+		// Preflight: require a healthy installed codex before running the live handler.
+		const help = spawnSync("codex", ["exec", "--help"], { encoding: "utf8" });
+		if (help.error) {
+			if ((help.error as NodeJS.ErrnoException).code === "ENOENT") return; // codex not installed
+			throw help.error;
+		}
+		expect(help.status).toBe(0);
+		// Security-sensitive + test path triggers the complex gate at frontier@high.
+		const path = "src/auth/credentials.test.ts";
+		const snippet = "const x=1;\n";
+		expect(gateModelEffort("code_change", path, snippet)).toEqual({
+			model: "gpt-5.6-sol",
+			effort: "high",
+		});
+		// Remove any ambient model override so the handler uses the gate's model.
+		const prevModel = process.env.CODEX_REFLECTOR_MODEL;
+		if (prevModel !== undefined) delete process.env.CODEX_REFLECTOR_MODEL;
+		try {
+			const { pi, handlers } = makePi();
+			codexReflector(pi);
+			const handler = handlers.get("tool_result");
+			expect(handler).toBeDefined();
+			if (!handler) return;
+			const event: Record<string, unknown> = {
+				type: "tool_result",
+				toolName: "write",
+				toolCallId: "id",
+				input: { path, content: snippet },
+				content: [],
+				isError: false,
+			};
+			const ctx: Record<string, unknown> = { cwd: ".", hasUI: false, ui: { notify() {} } };
+			const start = Date.now();
+			const result = await (handler as (e: unknown, c: unknown) => Promise<unknown>)(event, ctx);
+			const elapsed = Date.now() - start;
+			if (result === undefined) {
+				throw new Error(`handler integration returned undefined after ${elapsed}ms (budget ${HANDLER_BUDGET_MS}ms) — deadline, codex error, or fail-open`);
+			}
+			const r = result as { content?: Array<{ type?: string; text?: string }> };
+			const reviewText = r.content?.find(
+				(part) => part.type === "text" && part.text?.startsWith("Codex Review "),
+			)?.text;
+			const [header, body] = reviewText?.split(":\n", 2) ?? [];
+			expect(header).toMatch(/^Codex Review \S+ (?:PASS|FAIL|UNCERTAIN) \[[^\]\n]+\]$/);
+			expect(body?.trim().length ?? 0).toBeGreaterThan(0);
+			expect(elapsed).toBeLessThan(HANDLER_BUDGET_MS);
+		} finally {
+			if (prevModel === undefined) delete process.env.CODEX_REFLECTOR_MODEL;
+			else process.env.CODEX_REFLECTOR_MODEL = prevModel;
+		}
+	}, 65_000);
 	test("tool_result fails open when codex hangs (deadline SIGKILLs the child)", async () => {
 		const binDir = mkdtempSync(join(tmpdir(), "codex-ref-fakebin-"));
 		const fake = join(binDir, "codex");
