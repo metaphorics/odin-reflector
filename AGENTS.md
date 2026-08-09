@@ -21,6 +21,9 @@ This file is only for repo-specific constraints that are easy to break and expen
 - **Rule:** Keep the effort ladder closed at `low | medium | high | xhigh` on both surfaces. NEVER extend it with catalog efforts such as `max` or `ultra`, and NEVER reintroduce a model-specific effort clamp (the deleted spark low/medium→high force).
   **Why:** `ultra` is task-delegation oriented and wrong for a read-only reviewer. `max` risks blowing the OMP handler budget so reviews become silent fail-open no-ops. A model-specific clamp makes `CODEX_REFLECTOR_MODEL` lie about effort.
 
+- **Rule:** Keep OMP `CODE_REVIEW_COMPLEX` on the frontier role at high effort; Python keeps the same complex branch on frontier at xhigh. Do not raise the OMP preset to xhigh while the host handler cap is 30s.
+  **Why:** Live verification on 2026-08-10 measured a 5.5K frontier@xhigh call at 37.588s, and the full OMP handler returned no review when its child timed out at 26.020s. The same handler completed at frontier@high in 11.025s. Earlier xhigh runs completed in 18.3s, so the observed 18.3–37.6s spread is not reliable under the host cap. A completed high-effort review is better than a silent fail-open no-op. This is a deliberate, budget-forced surface difference.
+
 - **Rule:** `CODEX_REFLECTOR_MODEL` may replace only the model slug on the Codex argv; the effort chosen by the route and gate MUST pass through verbatim on both surfaces.
   **Why:** Operators use the override to A/B models. Rewriting effort under the override hides the real cost/latency of the chosen model and breaks the argv-capture contract that proves clamp removal.
 

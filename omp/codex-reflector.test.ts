@@ -14,6 +14,7 @@ import codexReflector, {
 	classify,
 	codeReviewResponse,
 	codexExecArgs,
+	CODEX_TIMEOUT_MS,
 	fileHeuristics,
 	gateModelEffort,
 	handlerDeadline,
@@ -196,11 +197,17 @@ describe("gateModelEffort", () => {
 			effort: "high",
 		});
 	});
-	test("multiple risk signals -> complex (xhigh)", () => {
+	test("file and change hints -> complex (frontier high within OMP budget)", () => {
 		// security-sensitive path (1 file hint) + >5000 chars (1 change hint) -> complex
 		expect(gateModelEffort("code_change", ".env.local", "X".repeat(6000))).toEqual({
 			model: "gpt-5.6-sol",
-			effort: "xhigh",
+			effort: "high",
+		});
+	});
+	test("multiple file hints -> complex (frontier high within OMP budget)", () => {
+		expect(gateModelEffort("code_change", "src/auth/credentials.test.ts", "const x=1;\n")).toEqual({
+			model: "gpt-5.6-sol",
+			effort: "high",
 		});
 	});
 	test("non code_change category -> base preset", () => {
@@ -265,36 +272,29 @@ describe("codexExecArgs", () => {
 		}
 	});
 
-	// Live smoke: direct Codex invocation latency for xhigh must stay within
-	// codex timeout 26s / handler budget 28s vs Python's ~100s guard. Measured 2026-08-09:
-	// xhigh with 5.5k payload took ~18.3s direct (small prompt ~6.4s), handler ~19.7s, all <28s.
-	// This test re-proves direct invocation latency when CODEX_SMOKE=1 is
-	// set; otherwise it documents the measurement without paying the 6-18s
-	// cost on every `bun test` run. It does NOT exercise handlerDeadline,
-	// snippet compaction, prompt construction, invokeCodex, or handler
-	// cleanup — see the handler integration smoke below for the full path.
-	test("xhigh direct Codex invocation latency stays within handler budget (live, opt-in)", () => {
+	test("frontier-high direct Codex invocation stays within child timeout (live, opt-in)", () => {
 		if (process.env.CODEX_SMOKE !== "1") return; // opt-in: `CODEX_SMOKE=1 bun test ...`
-		const outPath = `/tmp/codex-smoke-xhigh-${Date.now()}.txt`;
-		const largePayload = "const x=1;\n".repeat(500); // ~5.5k, same as complex gate
-		const prompt = `You are a reviewer. Review this code:\n${largePayload}\nOutput PASS only.`;
-		const xhighArgs = codexExecArgs("xhigh", "gpt-5.6-sol", outPath);
-		// codexExecArgs returns ["exec", ...], spawn needs "codex" + args
-		const start = Date.now();
-		const result = spawnSync("codex", xhighArgs, { input: prompt, encoding: "utf8", timeout: 60_000 });
-		const elapsed = Date.now() - start;
-		if (result.error) {
-			if ((result.error as NodeJS.ErrnoException).code === "ENOENT") return; // codex not installed
-			throw result.error;
+		const outPath = join(tmpdir(), `codex-smoke-high-${Date.now()}.txt`);
+		try {
+			const payload = "const x=1;\n".repeat(500); // ~5.5K, same size that falsified xhigh
+			const prompt = `You are a reviewer. Review this code:\n${payload}\nOutput PASS only.`;
+			const args = codexExecArgs("high", "gpt-5.6-sol", outPath);
+			const start = Date.now();
+			const result = spawnSync("codex", args, { input: prompt, encoding: "utf8", timeout: 60_000 });
+			const elapsed = Date.now() - start;
+			if (result.error) {
+				if ((result.error as NodeJS.ErrnoException).code === "ENOENT") return; // codex not installed
+				throw result.error;
+			}
+			if (result.status !== 0) {
+				throw new Error(`codex smoke failed: status=${result.status} stderr=${String(result.stderr).slice(0, 200)}`);
+			}
+			expect(elapsed).toBeLessThan(CODEX_TIMEOUT_MS);
+		} finally {
+			rmSync(outPath, { force: true });
 		}
-		// If codex is rate-limited or errors, don't fail the suite — the measurement
-		// above already proved the budget holds when codex is healthy.
-		if (result.status !== 0) {
-			console.warn(`codex smoke skipped: status=${result.status} stderr=${String(result.stderr).slice(0, 200)}`);
-			return;
-		}
-		expect(elapsed).toBeLessThan(HANDLER_BUDGET_MS);
 	}, 65_000);
+
 });
 
 describe("sandboxContent", () => {
@@ -1156,34 +1156,50 @@ exit 0
 			rmSync(binDir, { recursive: true, force: true });
 		}
 	}, 15_000);
-	test("xhigh handler integration through tool_result settles within budget (live, opt-in)", async () => {
+	test("frontier-high complex handler settles within OMP budget (live, opt-in)", async () => {
 		if (process.env.CODEX_SMOKE !== "1") return; // opt-in: `CODEX_SMOKE=1 bun test ...`
-		const { pi, handlers } = makePi();
-		codexReflector(pi);
-		const handler = handlers.get("tool_result");
-		expect(handler).toBeDefined();
-		if (!handler) return;
-		const largePayload = "const x=1;\n"; // small payload but path triggers xhigh via two fileHints
-		const event: Record<string, unknown> = {
-			type: "tool_result",
-			toolName: "write",
-			toolCallId: "id",
-			input: { path: "src/auth/credentials.test.ts", content: largePayload },
-			content: [],
-			isError: false,
-		};
-		const ctx: Record<string, unknown> = { cwd: ".", hasUI: false, ui: { notify() {} } };
-		const start = Date.now();
-		const result = await (handler as (e: unknown, c: unknown) => Promise<unknown>)(event, ctx);
-		const elapsed = Date.now() - start;
-		expect(elapsed).toBeLessThan(HANDLER_BUDGET_MS);
-		if (result === undefined) {
-			// Fail on deadline/budget expiry (elapsed near codex/handler budget), only skip on fast unavailability
-			if (elapsed < 5_000) {
-				console.warn(`handler smoke skipped: codex unavailable or fail-open (elapsed ${elapsed}ms)`);
-				return;
+		// Preflight: require a healthy installed codex before running the live handler.
+		const help = spawnSync("codex", ["exec", "--help"], { encoding: "utf8" });
+		if (help.error) {
+			if ((help.error as NodeJS.ErrnoException).code === "ENOENT") return; // codex not installed
+			throw help.error;
+		}
+		expect(help.status).toBe(0);
+		// Security-sensitive + test path triggers the complex gate at frontier@high.
+		const path = "src/auth/credentials.test.ts";
+		const snippet = "const x=1;\n";
+		expect(gateModelEffort("code_change", path, snippet)).toEqual({
+			model: "gpt-5.6-sol",
+			effort: "high",
+		});
+		// Remove any ambient model override so the handler uses the gate's model.
+		const prevModel = process.env.CODEX_REFLECTOR_MODEL;
+		if (prevModel !== undefined) delete process.env.CODEX_REFLECTOR_MODEL;
+		try {
+			const { pi, handlers } = makePi();
+			codexReflector(pi);
+			const handler = handlers.get("tool_result");
+			expect(handler).toBeDefined();
+			if (!handler) return;
+			const event: Record<string, unknown> = {
+				type: "tool_result",
+				toolName: "write",
+				toolCallId: "id",
+				input: { path, content: snippet },
+				content: [],
+				isError: false,
+			};
+			const ctx: Record<string, unknown> = { cwd: ".", hasUI: false, ui: { notify() {} } };
+			const start = Date.now();
+			const result = await (handler as (e: unknown, c: unknown) => Promise<unknown>)(event, ctx);
+			const elapsed = Date.now() - start;
+			if (result === undefined) {
+				throw new Error(`handler integration returned undefined after ${elapsed}ms (budget ${HANDLER_BUDGET_MS}ms) — deadline, codex error, or fail-open`);
 			}
-			throw new Error(`handler integration failed: returned undefined after ${elapsed}ms (budget ${HANDLER_BUDGET_MS}ms) — deadline or codex error, not unavailability`);
+			expect(elapsed).toBeLessThan(HANDLER_BUDGET_MS);
+		} finally {
+			if (prevModel === undefined) delete process.env.CODEX_REFLECTOR_MODEL;
+			else process.env.CODEX_REFLECTOR_MODEL = prevModel;
 		}
 	}, 65_000);
 	test("tool_result fails open when codex hangs (deadline SIGKILLs the child)", async () => {

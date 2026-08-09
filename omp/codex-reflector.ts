@@ -56,11 +56,11 @@ const FAST_MODEL = "gpt-5.6-luna"; // fast/affordable: summaries, mid-gate, tiny
 const MAX_COMPACT_CHARS = 400_000; // ~100K tokens — trigger matryoshka above this
 const COMPACT_THRESHOLD = 1500; // chars — re-summarize verbose codex output above this
 // Timeout hierarchy (all < EXTENSION_HANDLER_TIMEOUT_MS=30_000):
-// codex child 26s < handler budget 28s < harness 30s. 2s handler->harness margin
-// for cleanup; 2s codex->handler margin for prompt/compaction. Measured xhigh
-// via handler ~19-25s, so 25s codex was too tight (killed at budget, hid as
-// undefined). 26s codex + 28s handler gives headroom while staying 2s under harness.
-const CODEX_TIMEOUT_MS = 26_000;
+// codex child 26s < handler budget 28s < harness 30s. This leaves 2s for
+// cleanup at each boundary. OMP does not route xhigh reviews: a live 5.5K
+// call took 37.588s, and a handler hit this child timeout at 26.020s.
+// The same handler completed at frontier@high in 11.025s.
+export const CODEX_TIMEOUT_MS = 26_000;
 export const HANDLER_BUDGET_MS = 28_000;
 let handlerBudgetMs = HANDLER_BUDGET_MS;
 /** Test-only: shrink the per-handler budget so the deadline can be exercised
@@ -87,7 +87,8 @@ export interface Routed {
 // Model/effort presets — every (model, effort) pair lives here.
 const CODE_REVIEW: Preset = { model: DEFAULT_MODEL, effort: "medium" };
 const CODE_REVIEW_HARD: Preset = { model: FRONTIER_MODEL, effort: "high" };
-const CODE_REVIEW_COMPLEX: Preset = { model: FRONTIER_MODEL, effort: "xhigh" };
+// The OMP host caps handlers at 30s. Python keeps xhigh under its ~100s guard.
+const CODE_REVIEW_COMPLEX: Preset = { model: FRONTIER_MODEL, effort: "high" };
 const CODE_REVIEW_TINY: Preset = { model: FAST_MODEL, effort: "medium" };
 const THINKING: Preset = { model: DEFAULT_MODEL, effort: "high" };
 const BASH_FAILURE: Preset = { model: DEFAULT_MODEL, effort: "low" };
