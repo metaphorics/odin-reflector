@@ -1196,6 +1196,13 @@ exit 0
 			if (result === undefined) {
 				throw new Error(`handler integration returned undefined after ${elapsed}ms (budget ${HANDLER_BUDGET_MS}ms) — deadline, codex error, or fail-open`);
 			}
+			const r = result as { content?: Array<{ type?: string; text?: string }> };
+			const reviewText = r.content?.find(
+				(part) => part.type === "text" && part.text?.startsWith("Codex Review "),
+			)?.text;
+			const [header, body] = reviewText?.split(":\n", 2) ?? [];
+			expect(header).toMatch(/^Codex Review \S+ (?:PASS|FAIL|UNCERTAIN) \[[^\]\n]+\]$/);
+			expect(body?.trim().length ?? 0).toBeGreaterThan(0);
 			expect(elapsed).toBeLessThan(HANDLER_BUDGET_MS);
 		} finally {
 			if (prevModel === undefined) delete process.env.CODEX_REFLECTOR_MODEL;
