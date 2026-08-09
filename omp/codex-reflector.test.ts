@@ -71,13 +71,13 @@ describe("parseVerdict", () => {
 
 describe("classify", () => {
 	test("native mutators -> code_change", () => {
-		expect(classify("write", false)?.category).toBe("code_change");
-		expect(classify("edit", false)?.category).toBe("code_change");
-		expect(classify("ast_edit", false)?.category).toBe("code_change");
-		expect(classify("fast_edit", false)?.category).toBe("code_change");
+		expect(classify("write", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
+		expect(classify("edit", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
+		expect(classify("ast_edit", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
+		expect(classify("fast_edit", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
 	});
 	test("bash failure -> bash_failure, bash success -> null", () => {
-		expect(classify("bash", true)?.category).toBe("bash_failure");
+		expect(classify("bash", true)).toEqual({ category: "bash_failure", model: "gpt-5.6-terra", effort: "low" });
 		expect(classify("bash", false)).toBeNull();
 	});
 	test("non-reviewed tools -> null", () => {
@@ -86,12 +86,12 @@ describe("classify", () => {
 		expect(classify("search", false)).toBeNull();
 	});
 	test("thinking MCP -> thinking", () => {
-		expect(classify("mcp__sequential__sequentialthinking", false)?.category).toBe("thinking");
-		expect(classify("mcp__shannon__shannon", false)?.category).toBe("thinking");
+		expect(classify("mcp__sequential__sequentialthinking", false)).toEqual({ category: "thinking", model: "gpt-5.6-terra", effort: "high" });
+		expect(classify("mcp__shannon__shannon", false)).toEqual({ category: "thinking", model: "gpt-5.6-terra", effort: "high" });
 	});
 	test("Fast-Apply MCP success -> code_change", () => {
-		expect(classify("mcp__morph__edit_file", false)?.category).toBe("code_change");
-		expect(classify("mcp__morphllm__edit_file", false)?.category).toBe("code_change");
+		expect(classify("mcp__morph__edit_file", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
+		expect(classify("mcp__morphllm__edit_file", false)).toEqual({ category: "code_change", model: "gpt-5.6-terra", effort: "medium" });
 	});
 	test("non-edit Morph MCP tools -> null (fastcompact is not an edit)", () => {
 		expect(classify("mcp__morph__fastcompact", false)).toBeNull();
@@ -106,13 +106,13 @@ describe("classify", () => {
 	});
 	test("Fast-Apply MCP failure WITH Morph payload -> code_change_failure", () => {
 		expect(
-			classify("mcp__morph__edit_file", true, { code_edit: "x", instruction: "y" })?.category,
-		).toBe("code_change_failure");
+			classify("mcp__morph__edit_file", true, { code_edit: "x", instruction: "y" }),
+		).toEqual({ category: "code_change_failure", model: "gpt-5.6-terra", effort: "low" });
 	});
 	test("native fast_edit failure WITH Morph payload -> code_change_failure", () => {
 		expect(
-			classify("fast_edit", true, { code_edit: "x", instructions: "y" })?.category,
-		).toBe("code_change_failure");
+			classify("fast_edit", true, { code_edit: "x", instructions: "y" }),
+		).toEqual({ category: "code_change_failure", model: "gpt-5.6-terra", effort: "low" });
 	});
 	test("native fast_edit failure WITHOUT complete payload -> null", () => {
 		expect(classify("fast_edit", true)).toBeNull();
@@ -259,8 +259,9 @@ describe("codexExecArgs", () => {
 			throw help.error;
 		}
 		expect(help.status).toBe(0);
+		const accepted = new Set(help.stdout.match(/--[a-z][a-z0-9-]*/g) ?? []);
 		for (const flag of args.filter((a) => a.startsWith("--"))) {
-			expect(help.stdout).toContain(flag);
+			expect(accepted.has(flag)).toBe(true);
 		}
 	});
 
@@ -808,7 +809,7 @@ exit 0
 				type: "tool_result",
 				toolName: "write",
 				toolCallId: "id",
-				input: { path: "src/util.ts", content: "const x = 1;" },
+				input: { path: ".env.local", content: "API_KEY=sk-deadbeefcafebabe\n" },
 				content: [],
 				isError: false,
 			} as unknown as Parameters<NonNullable<typeof handler>>[0];
@@ -820,7 +821,7 @@ exit 0
 			const argsLines = readFileSync(argsLog, "utf8").trim().split("\n");
 			expect(argsLines).toHaveLength(1);
 			expect(argsLines[0]).toContain("-m gpt-5.3-codex-spark");
-			expect(argsLines[0]).toContain("model_reasoning_effort=medium");
+			expect(argsLines[0]).toContain("model_reasoning_effort=high");
 		} finally {
 			process.env.PATH = prevPath;
 			if (prevModel === undefined) delete process.env.CODEX_REFLECTOR_MODEL;
